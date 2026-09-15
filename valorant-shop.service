@@ -1,0 +1,15 @@
+[Unit]
+Description=Valorant Shop Discord Bot
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/valorant-shop
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/root/valorant-shop/venv/bin/python bot.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
