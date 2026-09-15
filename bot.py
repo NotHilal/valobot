@@ -24,9 +24,10 @@ tree = app_commands.CommandTree(client)
 async def login(interaction: discord.Interaction, url: str = None):
     if url is None:
         await interaction.response.send_message(
-            f"1. Click this link and log in with Riot (your password never touches this bot): {riot.build_login_url()}\n"
-            "2. You'll land on a mostly blank page - copy the **full** URL from your browser's address bar.\n"
-            "3. Run `/login` again and paste that URL into the `url` option.",
+            f"1. Tap this link and log in with Riot (your password never touches this bot): {riot.build_login_url()}\n"
+            "2. You'll arrive on a **404 error page** after logging in - that's normal, we just need the link "
+            "from that page to continue. Please tap **Share** (or the **•••** menu) and copy the URL.\n"
+            "3. Switch back here, run `/login` again, and paste it into the `url` option.",
             ephemeral=True,
         )
         return
@@ -52,7 +53,7 @@ async def login(interaction: discord.Interaction, url: str = None):
 
 @tree.command(name="shop", description="Show your daily VALORANT storefront")
 async def shop(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True, thinking=True)
+    await interaction.response.defer(thinking=True)
 
     session = storage.get_user(interaction.user.id)
     if not session:
@@ -92,8 +93,8 @@ async def shop(interaction: discord.Interaction):
     hours, rem = divmod(remaining_seconds, 3600)
     minutes = rem // 60
 
-    header = f"🎮 **Your Daily VALORANT Store** — refreshes in {hours}h {minutes}m"
-    await interaction.followup.send(content=header, embeds=embeds[:10], ephemeral=True)
+    header = f"🎮 **{interaction.user.display_name}'s Daily VALORANT Store** — refreshes in {hours}h {minutes}m"
+    await interaction.followup.send(content=header, embeds=embeds[:10], ephemeral=False)
 
 
 @tree.command(name="logout", description="Remove your saved Riot login from this bot")
