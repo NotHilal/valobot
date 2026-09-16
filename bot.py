@@ -34,7 +34,8 @@ class LoginLinkModal(discord.ui.Modal, title="Paste your login link"):
         except riot.RiotAuthError as exc:
             await interaction.followup.send(f"❌ {exc}", ephemeral=True)
             return
-        except Exception:
+        except Exception as exc:
+            print(f"login error for user {interaction.user.id}: {exc!r}")
             await interaction.followup.send(
                 "❌ Something went wrong talking to Riot. Please try /login again.", ephemeral=True
             )
