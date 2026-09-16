@@ -8,7 +8,7 @@ import aiohttp
 import discord
 from discord import app_commands
 from dotenv import load_dotenv
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 import gacha
 import riot
@@ -74,22 +74,41 @@ async def login(interaction: discord.Interaction):
 
 
 SHOP_GALLERY_URL = "https://playvalorant.com/shop"  # shared across embeds so Discord tiles their images into a grid
-ICON_TILE_SIZE = 160
-NUMBER_EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+CARD_WIDTH = 130
+CARD_ICON_HEIGHT = 130
+CARD_TEXT_HEIGHT = 46
+CARD_HEIGHT = CARD_ICON_HEIGHT + CARD_TEXT_HEIGHT
 
 
-async def _square_icon_file(http: aiohttp.ClientSession, url: str, filename: str) -> discord.File:
-    async with http.get(url) as resp:
+def _draw_centered_text(draw: ImageDraw.ImageDraw, text: str, y: int, font: ImageFont.FreeTypeFont, fill) -> None:
+    bbox = draw.textbbox((0, 0), text, font=font)
+    x = (CARD_WIDTH - (bbox[2] - bbox[0])) // 2
+    draw.text((x, y), text, font=font, fill=fill)
+
+
+def _fit_name(name: str, limit: int = 16) -> str:
+    return name if len(name) <= limit else name[: limit - 1] + "…"
+
+
+async def _shop_card_file(http: aiohttp.ClientSession, icon_url: str, name: str, price: str, filename: str) -> discord.File:
+    async with http.get(icon_url) as resp:
         raw = await resp.read()
 
-    img = Image.open(io.BytesIO(raw)).convert("RGBA")
-    img.thumbnail((ICON_TILE_SIZE, ICON_TILE_SIZE), Image.LANCZOS)
+    icon = Image.open(io.BytesIO(raw)).convert("RGBA")
+    icon.thumbnail((CARD_WIDTH - 10, CARD_ICON_HEIGHT - 10), Image.LANCZOS)
 
-    tile = Image.new("RGBA", (ICON_TILE_SIZE, ICON_TILE_SIZE), (0, 0, 0, 0))
-    tile.paste(img, ((ICON_TILE_SIZE - img.width) // 2, (ICON_TILE_SIZE - img.height) // 2), img)
+    card = Image.new("RGBA", (CARD_WIDTH, CARD_HEIGHT), (0, 0, 0, 0))
+    card.paste(icon, ((CARD_WIDTH - icon.width) // 2, (CARD_ICON_HEIGHT - icon.height) // 2), icon)
+
+    draw = ImageDraw.Draw(card)
+    name_font = ImageFont.load_default(size=15)
+    price_font = ImageFont.load_default(size=13)
+
+    _draw_centered_text(draw, _fit_name(name), CARD_ICON_HEIGHT + 2, name_font, (255, 255, 255, 255))
+    _draw_centered_text(draw, price, CARD_ICON_HEIGHT + 22, price_font, (255, 209, 102, 255))
 
     buf = io.BytesIO()
-    tile.save(buf, format="PNG")
+    card.save(buf, format="PNG")
     buf.seek(0)
     return discord.File(buf, filename=filename)
 
@@ -122,7 +141,6 @@ async def shop(interaction: discord.Interaction):
 
         offers, remaining_seconds = riot.parse_daily_offers(storefront)
 
-        lines = []
         files = []
         embeds = []
         for i, offer in enumerate(offers):
@@ -131,18 +149,14 @@ async def shop(interaction: discord.Interaction):
             else:
                 details = {"name": "Unknown Skin", "icon": None}
 
-            price = f"{offer['cost']} VP" if offer["cost"] is not None else "Price unavailable"
-            lines.append(f"{NUMBER_EMOJIS[i]} **{details['name']}**\n> 💰 {price}")
+            price = f"💰 {offer['cost']} VP" if offer["cost"] is not None else "Price unavailable"
 
             embed = discord.Embed(url=SHOP_GALLERY_URL, color=discord.Color.red())
             if details["icon"]:
                 filename = f"skin{i}.png"
-                files.append(await _square_icon_file(http, details["icon"], filename))
+                files.append(await _shop_card_file(http, details["icon"], details["name"], price, filename))
                 embed.set_image(url=f"attachment://{filename}")
             embeds.append(embed)
-
-    if embeds:
-        embeds[0].description = "\n\n".join(lines)
 
     remaining_seconds = max(remaining_seconds, 0)
     hours, rem = divmod(remaining_seconds, 3600)
