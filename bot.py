@@ -107,9 +107,7 @@ async def shop(interaction: discord.Interaction):
                 details = {"name": "Unknown Skin", "icon": None}
 
             price = f"💰 **{offer['cost']}** VP" if offer["cost"] is not None else "Price unavailable"
-            embed = discord.Embed(
-                title=details["name"], description=price, color=discord.Color.red(), url="https://playvalorant.com/"
-            )
+            embed = discord.Embed(title=details["name"], description=price, color=discord.Color.red())
             if details["icon"]:
                 embed.set_image(url=details["icon"])
             embeds.append(embed)
