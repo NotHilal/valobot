@@ -1,4 +1,5 @@
-"""Minimal Discord bot: /login, /shop, /logout for a personal VALORANT shop viewer."""
+"""Minimal Discord bot: /login, /shop, /logout for a personal VALORANT shop viewer,
+plus /rollskin, /collection, /trade for a daily skin-collecting side game."""
 
 import os
 
@@ -7,6 +8,7 @@ import discord
 from discord import app_commands
 from dotenv import load_dotenv
 
+import gacha
 import riot
 import storage
 
@@ -71,25 +73,28 @@ async def login(interaction: discord.Interaction):
 
 @tree.command(name="shop", description="Show your daily VALORANT storefront")
 async def shop(interaction: discord.Interaction):
-    await interaction.response.defer(thinking=True)
-
     session = storage.get_user(interaction.user.id)
     if not session:
-        await interaction.followup.send("You're not logged in. Run `/login` first.", ephemeral=True)
+        await interaction.response.send_message("You're not logged in. Run `/login` first.", ephemeral=True)
         return
+
+    if riot.is_session_expired(session):
+        storage.delete_user(interaction.user.id)
+        await interaction.response.send_message("Your Riot session expired. Run `/login` again.", ephemeral=True)
+        return
+
+    await interaction.response.defer(thinking=True)
 
     async with aiohttp.ClientSession() as http:
         try:
             storefront = await riot.get_storefront(http, session)
         except riot.SessionExpiredError:
             storage.delete_user(interaction.user.id)
-            await interaction.followup.send("Your Riot session expired. Run `/login` again.", ephemeral=True)
+            await interaction.followup.send("Your Riot session expired. Run `/login` again.")
             return
         except Exception as exc:
             print(f"shop error for user {interaction.user.id}: {exc!r}")
-            await interaction.followup.send(
-                "Couldn't reach Riot's servers right now. Try again shortly.", ephemeral=True
-            )
+            await interaction.followup.send("Couldn't reach Riot's servers right now. Try again shortly.")
             return
 
         offers, remaining_seconds = riot.parse_daily_offers(storefront)
@@ -101,10 +106,12 @@ async def shop(interaction: discord.Interaction):
             else:
                 details = {"name": "Unknown Skin", "icon": None}
 
-            price = f"{offer['cost']} VP" if offer["cost"] is not None else "Price unavailable"
-            embed = discord.Embed(title=details["name"], description=price, color=discord.Color.red())
+            price = f"💰 **{offer['cost']}** VP" if offer["cost"] is not None else "Price unavailable"
+            embed = discord.Embed(
+                title=details["name"], description=price, color=discord.Color.red(), url="https://playvalorant.com/"
+            )
             if details["icon"]:
-                embed.set_thumbnail(url=details["icon"])
+                embed.set_image(url=details["icon"])
             embeds.append(embed)
 
     remaining_seconds = max(remaining_seconds, 0)
@@ -122,6 +129,297 @@ async def logout(interaction: discord.Interaction):
         await interaction.response.send_message("✅ Your Riot session has been removed.", ephemeral=True)
     else:
         await interaction.response.send_message("You weren't logged in.", ephemeral=True)
+
+
+@tree.command(name="rollskin", description="Roll for a random Valorant skin (once per day)")
+async def roll_cmd(interaction: discord.Interaction):
+    collection = storage.get_collection(interaction.user.id)
+    if collection.get("last_roll") == gacha.today_utc():
+        remaining = gacha.seconds_until_next_utc_day()
+        hours, rem = divmod(remaining, 3600)
+        minutes = rem // 60
+        await interaction.response.send_message(
+            f"You already rolled today. Next roll in {hours}h {minutes}m.", ephemeral=True
+        )
+        return
+
+    await interaction.response.defer(thinking=True)
+
+    async with aiohttp.ClientSession() as http:
+        pool = await gacha.get_pool(http)
+    item = gacha.roll(pool)
+
+    collection["items"].append(item)
+    collection["last_roll"] = gacha.today_utc()
+    storage.save_collection(interaction.user.id, collection)
+
+    embed = discord.Embed(
+        title=f"🎉 {interaction.user.display_name} rolled: {item['name']}",
+        description=f"Rarity: **{item['rarity']}**",
+        color=discord.Color.gold(),
+    )
+    embed.set_image(url=item["icon"])
+    await interaction.followup.send(embed=embed)
+
+
+@tree.command(name="collection", description="Show your top 5 rarest Valorant skins")
+async def collection_cmd(interaction: discord.Interaction):
+    collection = storage.get_collection(interaction.user.id)
+    items = collection.get("items", [])
+    if not items:
+        await interaction.response.send_message(
+            "You haven't rolled any skins yet. Try `/rollskin`!", ephemeral=True
+        )
+        return
+
+    top = gacha.top_items(items, 5)
+    embeds = []
+    for item in top:
+        embed = discord.Embed(
+            title=item["name"], description=f"Rarity: **{item['rarity']}**", color=discord.Color.purple()
+        )
+        embed.set_image(url=item["icon"])
+        embeds.append(embed)
+
+    header = f"🏆 **{interaction.user.display_name}'s Top {len(top)} Skins** — {len(items)} total in collection"
+    await interaction.response.send_message(content=header, embeds=embeds)
+
+
+class TradeView(discord.ui.View):
+    def __init__(self, proposer: discord.Member, responder: discord.Member, offer_item: dict, request_item: dict):
+        super().__init__(timeout=300)
+        self.proposer = proposer
+        self.responder = responder
+        self.offer_item = offer_item
+        self.request_item = request_item
+        self.message: discord.Message | None = None
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(content="Trade offer expired.", view=self)
+            except discord.HTTPException:
+                pass
+
+    @discord.ui.button(label="Accept", style=discord.ButtonStyle.success)
+    async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.responder.id:
+            await interaction.response.send_message("This trade offer isn't for you.", ephemeral=True)
+            return
+
+        proposer_collection = storage.get_collection(self.proposer.id)
+        responder_collection = storage.get_collection(self.responder.id)
+
+        given = gacha.pop_item(proposer_collection, self.offer_item["name"])
+        received = gacha.pop_item(responder_collection, self.request_item["name"])
+
+        for child in self.children:
+            child.disabled = True
+
+        if not given or not received:
+            await interaction.response.edit_message(
+                content="This trade is no longer valid (an item was already traded away).", view=self
+            )
+            return
+
+        proposer_collection["items"].append(received)
+        responder_collection["items"].append(given)
+        storage.save_collection(self.proposer.id, proposer_collection)
+        storage.save_collection(self.responder.id, responder_collection)
+
+        await interaction.response.edit_message(
+            content=f"✅ Trade completed between {self.proposer.display_name} and {self.responder.display_name}!",
+            view=self,
+        )
+
+    @discord.ui.button(label="Decline", style=discord.ButtonStyle.danger)
+    async def decline(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.responder.id:
+            await interaction.response.send_message("This trade offer isn't for you.", ephemeral=True)
+            return
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(content="❌ Trade declined.", view=self)
+
+
+async def _offer_autocomplete(interaction: discord.Interaction, current: str):
+    collection = storage.get_collection(interaction.user.id)
+    names = sorted({item["name"] for item in collection.get("items", [])})
+    matches = [n for n in names if current.lower() in n.lower()][:25]
+    return [app_commands.Choice(name=n, value=n) for n in matches]
+
+
+async def _member_collection_autocomplete(interaction: discord.Interaction, current: str):
+    """Autocompletes item names from whichever member is bound to the command's `user` option."""
+    target = interaction.namespace.user
+    if not target:
+        return []
+    collection = storage.get_collection(target.id)
+    names = sorted({item["name"] for item in collection.get("items", [])})
+    matches = [n for n in names if current.lower() in n.lower()][:25]
+    return [app_commands.Choice(name=n, value=n) for n in matches]
+
+
+def _is_owner(interaction: discord.Interaction) -> bool:
+    return interaction.guild is not None and interaction.user.id == interaction.guild.owner_id
+
+
+@tree.command(name="trade", description="Offer to trade one of your skins for one of a friend's")
+@app_commands.describe(
+    user="Who to trade with", offer="Your skin to give", request="Their skin you want in return"
+)
+@app_commands.autocomplete(offer=_offer_autocomplete, request=_member_collection_autocomplete)
+async def trade_cmd(interaction: discord.Interaction, user: discord.Member, offer: str, request: str):
+    if user.id == interaction.user.id:
+        await interaction.response.send_message("You can't trade with yourself.", ephemeral=True)
+        return
+    if user.bot:
+        await interaction.response.send_message("You can't trade with a bot.", ephemeral=True)
+        return
+
+    my_collection = storage.get_collection(interaction.user.id)
+    their_collection = storage.get_collection(user.id)
+
+    my_item = gacha.find_item(my_collection, offer)
+    their_item = gacha.find_item(their_collection, request)
+
+    if not my_item:
+        await interaction.response.send_message(
+            f"You don't have a skin named \"{offer}\". Check `/collection`.", ephemeral=True
+        )
+        return
+    if not their_item:
+        await interaction.response.send_message(
+            f"{user.display_name} doesn't have a skin named \"{request}\".", ephemeral=True
+        )
+        return
+
+    view = TradeView(proposer=interaction.user, responder=user, offer_item=my_item, request_item=their_item)
+    embed = discord.Embed(title="🔄 Trade Offer", color=discord.Color.blue())
+    embed.add_field(name=f"{interaction.user.display_name} gives", value=f"{my_item['name']} ({my_item['rarity']})")
+    embed.add_field(name=f"{user.display_name} gives", value=f"{their_item['name']} ({their_item['rarity']})")
+
+    await interaction.response.send_message(content=f"{user.mention}, you have a trade offer!", embed=embed, view=view)
+    view.message = await interaction.original_response()
+
+
+@tree.command(name="addskin", description="(Server owner only) Add a custom skin to the roll pool")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(name="Skin name", rarity="Rarity tier", image="Upload an image for this skin")
+@app_commands.choices(rarity=[app_commands.Choice(name=tier, value=tier) for tier in gacha.RARITY_TIERS])
+async def addskin_cmd(
+    interaction: discord.Interaction, name: str, rarity: app_commands.Choice[str], image: discord.Attachment
+):
+    if not _is_owner(interaction):
+        await interaction.response.send_message("Only the server owner can add custom skins.", ephemeral=True)
+        return
+
+    if not (image.content_type or "").startswith("image/"):
+        await interaction.response.send_message("Please upload an image file.", ephemeral=True)
+        return
+
+    custom_skins = gacha.load_custom_skins_raw()
+    custom_skins.append({"name": name, "rarity": rarity.value, "icon": image.url})
+    gacha.save_custom_skins_raw(custom_skins)
+
+    embed = discord.Embed(
+        title=f"✅ Added custom skin: {name}", description=f"Rarity: **{rarity.value}**", color=discord.Color.green()
+    )
+    embed.set_image(url=image.url)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+async def _pool_skin_autocomplete(interaction: discord.Interaction, current: str):
+    if len(current) < 2:
+        return []
+    async with aiohttp.ClientSession() as http:
+        pool = await gacha.get_pool(http)
+    matches = []
+    cur = current.lower()
+    for items in pool.values():
+        for item in items:
+            if cur in item["name"].lower() and item["name"] not in matches:
+                matches.append(item["name"])
+            if len(matches) >= 25:
+                break
+        if len(matches) >= 25:
+            break
+    return [app_commands.Choice(name=n, value=n) for n in matches]
+
+
+@tree.command(name="give", description="(Server owner only) Give a user a specific skin")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(user="Who to give the skin to", skin="The skin to give (start typing to search)")
+@app_commands.autocomplete(skin=_pool_skin_autocomplete)
+async def give_cmd(interaction: discord.Interaction, user: discord.Member, skin: str):
+    if not _is_owner(interaction):
+        await interaction.response.send_message("Only the server owner can do that.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    async with aiohttp.ClientSession() as http:
+        pool = await gacha.get_pool(http)
+    item = gacha.find_in_pool(pool, skin)
+    if not item:
+        await interaction.followup.send(f"No skin named \"{skin}\" found.", ephemeral=True)
+        return
+
+    collection = storage.get_collection(user.id)
+    collection["items"].append(gacha.stamp(item))
+    storage.save_collection(user.id, collection)
+    await interaction.followup.send(
+        f"🎁 Gave **{item['name']}** ({item['rarity']}) to {user.display_name}.", ephemeral=True
+    )
+
+
+@tree.command(name="removeskin", description="(Server owner only) Remove a skin from a user's collection")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(user="Whose collection to remove from", skin="The skin to remove")
+@app_commands.autocomplete(skin=_member_collection_autocomplete)
+async def removeskin_cmd(interaction: discord.Interaction, user: discord.Member, skin: str):
+    if not _is_owner(interaction):
+        await interaction.response.send_message("Only the server owner can do that.", ephemeral=True)
+        return
+
+    collection = storage.get_collection(user.id)
+    removed = gacha.pop_item(collection, skin)
+    if not removed:
+        await interaction.response.send_message(
+            f"{user.display_name} doesn't have a skin named \"{skin}\".", ephemeral=True
+        )
+        return
+
+    storage.save_collection(user.id, collection)
+    await interaction.response.send_message(
+        f"🗑️ Removed **{removed['name']}** from {user.display_name}'s collection.", ephemeral=True
+    )
+
+
+async def _custom_skin_autocomplete(interaction: discord.Interaction, current: str):
+    names = [item["name"] for item in gacha.load_custom_skins_raw()]
+    matches = [n for n in names if current.lower() in n.lower()][:25]
+    return [app_commands.Choice(name=n, value=n) for n in matches]
+
+
+@tree.command(name="deleteskin", description="(Server owner only) Delete a custom skin from the pool")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(skin="The custom skin to delete")
+@app_commands.autocomplete(skin=_custom_skin_autocomplete)
+async def deleteskin_cmd(interaction: discord.Interaction, skin: str):
+    if not _is_owner(interaction):
+        await interaction.response.send_message("Only the server owner can do that.", ephemeral=True)
+        return
+
+    custom_skins = gacha.load_custom_skins_raw()
+    remaining = [s for s in custom_skins if s["name"].lower() != skin.lower()]
+    if len(remaining) == len(custom_skins):
+        await interaction.response.send_message(f"No custom skin named \"{skin}\" found.", ephemeral=True)
+        return
+
+    gacha.save_custom_skins_raw(remaining)
+    await interaction.response.send_message(f"🗑️ Deleted custom skin **{skin}** from the pool.", ephemeral=True)
 
 
 @client.event

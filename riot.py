@@ -149,8 +149,12 @@ async def create_session(redirect_url: str) -> dict:
         return await _finish_session(http, access_token, id_token)
 
 
+def is_session_expired(session: dict) -> bool:
+    return time.time() >= session.get("expires_at", 0)
+
+
 async def get_storefront(http: aiohttp.ClientSession, session: dict) -> dict:
-    if time.time() >= session.get("expires_at", 0):
+    if is_session_expired(session):
         raise SessionExpiredError()
 
     client_version = await _get_client_version(http)

@@ -1,5 +1,6 @@
-.env
-users.json
 venv/
 __pycache__/
 *.pyc
+.env
+users.json
+bot.py.bak.*
