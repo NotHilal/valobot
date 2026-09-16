@@ -75,6 +75,7 @@ async def login(interaction: discord.Interaction):
 
 SHOP_GALLERY_URL = "https://playvalorant.com/shop"  # shared across embeds so Discord tiles their images into a grid
 ICON_TILE_SIZE = 160
+NUMBER_EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
 
 
 async def _square_icon_file(http: aiohttp.ClientSession, url: str, filename: str) -> discord.File:
@@ -130,8 +131,8 @@ async def shop(interaction: discord.Interaction):
             else:
                 details = {"name": "Unknown Skin", "icon": None}
 
-            price = f"💰 **{offer['cost']}** VP" if offer["cost"] is not None else "Price unavailable"
-            lines.append(f"**{details['name']}** — {price}")
+            price = f"{offer['cost']} VP" if offer["cost"] is not None else "Price unavailable"
+            lines.append(f"{NUMBER_EMOJIS[i]} **{details['name']}**\n> 💰 {price}")
 
             embed = discord.Embed(url=SHOP_GALLERY_URL, color=discord.Color.red())
             if details["icon"]:
@@ -141,7 +142,7 @@ async def shop(interaction: discord.Interaction):
             embeds.append(embed)
 
     if embeds:
-        embeds[0].description = "\n".join(lines)
+        embeds[0].description = "\n\n".join(lines)
 
     remaining_seconds = max(remaining_seconds, 0)
     hours, rem = divmod(remaining_seconds, 3600)
