@@ -1,14 +1,12 @@
 """Minimal Discord bot: /login, /shop, /logout for a personal VALORANT shop viewer,
 plus /rollskin, /collection, /trade for a daily skin-collecting side game."""
 
-import io
 import os
 
 import aiohttp
 import discord
 from discord import app_commands
 from dotenv import load_dotenv
-from PIL import Image, ImageDraw, ImageFont
 
 import gacha
 import riot
@@ -73,46 +71,6 @@ async def login(interaction: discord.Interaction):
     )
 
 
-SHOP_GALLERY_URL = "https://playvalorant.com/shop"  # shared across embeds so Discord tiles their images into a grid
-CARD_WIDTH = 130
-CARD_ICON_HEIGHT = 130
-CARD_TEXT_HEIGHT = 46
-CARD_HEIGHT = CARD_ICON_HEIGHT + CARD_TEXT_HEIGHT
-
-
-def _draw_centered_text(draw: ImageDraw.ImageDraw, text: str, y: int, font: ImageFont.FreeTypeFont, fill) -> None:
-    bbox = draw.textbbox((0, 0), text, font=font)
-    x = (CARD_WIDTH - (bbox[2] - bbox[0])) // 2
-    draw.text((x, y), text, font=font, fill=fill)
-
-
-def _fit_name(name: str, limit: int = 16) -> str:
-    return name if len(name) <= limit else name[: limit - 1] + "…"
-
-
-async def _shop_card_file(http: aiohttp.ClientSession, icon_url: str, name: str, price: str, filename: str) -> discord.File:
-    async with http.get(icon_url) as resp:
-        raw = await resp.read()
-
-    icon = Image.open(io.BytesIO(raw)).convert("RGBA")
-    icon.thumbnail((CARD_WIDTH - 10, CARD_ICON_HEIGHT - 10), Image.LANCZOS)
-
-    card = Image.new("RGBA", (CARD_WIDTH, CARD_HEIGHT), (0, 0, 0, 0))
-    card.paste(icon, ((CARD_WIDTH - icon.width) // 2, (CARD_ICON_HEIGHT - icon.height) // 2), icon)
-
-    draw = ImageDraw.Draw(card)
-    name_font = ImageFont.load_default(size=15)
-    price_font = ImageFont.load_default(size=13)
-
-    _draw_centered_text(draw, _fit_name(name), CARD_ICON_HEIGHT + 2, name_font, (255, 255, 255, 255))
-    _draw_centered_text(draw, price, CARD_ICON_HEIGHT + 22, price_font, (255, 209, 102, 255))
-
-    buf = io.BytesIO()
-    card.save(buf, format="PNG")
-    buf.seek(0)
-    return discord.File(buf, filename=filename)
-
-
 @tree.command(name="shop", description="Show your daily VALORANT storefront")
 async def shop(interaction: discord.Interaction):
     session = storage.get_user(interaction.user.id)
@@ -141,21 +99,17 @@ async def shop(interaction: discord.Interaction):
 
         offers, remaining_seconds = riot.parse_daily_offers(storefront)
 
-        files = []
         embeds = []
-        for i, offer in enumerate(offers):
+        for offer in offers:
             if offer["item_id"]:
                 details = await riot.get_skin_details(http, offer["item_id"])
             else:
                 details = {"name": "Unknown Skin", "icon": None}
 
             price = f"💰 {offer['cost']} VP" if offer["cost"] is not None else "Price unavailable"
-
-            embed = discord.Embed(url=SHOP_GALLERY_URL, color=discord.Color.red())
+            embed = discord.Embed(title=details["name"], description=price, color=discord.Color.red())
             if details["icon"]:
-                filename = f"skin{i}.png"
-                files.append(await _shop_card_file(http, details["icon"], details["name"], price, filename))
-                embed.set_image(url=f"attachment://{filename}")
+                embed.set_thumbnail(url=details["icon"])
             embeds.append(embed)
 
     remaining_seconds = max(remaining_seconds, 0)
@@ -163,7 +117,7 @@ async def shop(interaction: discord.Interaction):
     minutes = rem // 60
 
     header = f"🎮 **{interaction.user.display_name}'s Daily VALORANT Store** — refreshes in {hours}h {minutes}m"
-    await interaction.followup.send(content=header, embeds=embeds[:10], files=files[:10], ephemeral=False)
+    await interaction.followup.send(content=header, embeds=embeds[:10], ephemeral=False)
 
 
 @tree.command(name="logout", description="Remove your saved Riot login from this bot")
