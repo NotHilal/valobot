@@ -187,10 +187,42 @@ def parse_daily_offers(storefront: dict) -> tuple[list[dict], int]:
     return offers, remaining
 
 
+_LEVEL_INDEX_CACHE: dict = {"value": None, "fetched_at": 0.0}
+_LEVEL_INDEX_TTL_SECONDS = 24 * 3600
+
+
+async def _get_level_index(http: aiohttp.ClientSession) -> dict[str, dict]:
+    """Maps a skin level's uuid (what storefront offers reference) to its name/icon/rarity-tier icon.
+
+    valorant-api.com only exposes contentTierUuid on the parent skin, not the level, so this
+    walks the full skins catalog once (cached) instead of doing it per shop item.
+    """
+    now = time.time()
+    if _LEVEL_INDEX_CACHE["value"] is not None and now - _LEVEL_INDEX_CACHE["fetched_at"] < _LEVEL_INDEX_TTL_SECONDS:
+        return _LEVEL_INDEX_CACHE["value"]
+
+    async with http.get(f"{VALORANT_API_BASE}/contenttiers") as resp:
+        tiers = (await resp.json())["data"]
+    tier_icons = {t["uuid"]: t["displayIcon"] for t in tiers}
+
+    async with http.get(f"{VALORANT_API_BASE}/weapons/skins", params={"language": "en-US"}) as resp:
+        skins = (await resp.json())["data"]
+
+    index: dict[str, dict] = {}
+    for skin in skins:
+        tier_icon = tier_icons.get(skin.get("contentTierUuid"))
+        for level in skin.get("levels", []):
+            index[level["uuid"]] = {
+                "name": level.get("displayName") or skin.get("displayName", "Unknown Skin"),
+                "icon": level.get("displayIcon") or skin.get("displayIcon"),
+                "tier_icon": tier_icon,
+            }
+
+    _LEVEL_INDEX_CACHE["value"] = index
+    _LEVEL_INDEX_CACHE["fetched_at"] = now
+    return index
+
+
 async def get_skin_details(http: aiohttp.ClientSession, level_uuid: str) -> dict:
-    url = f"{VALORANT_API_BASE}/weapons/skinlevels/{level_uuid}"
-    async with http.get(url, params={"language": "en-US"}) as resp:
-        if resp.status != 200:
-            return {"name": "Unknown Skin", "icon": None}
-        data = (await resp.json())["data"]
-    return {"name": data.get("displayName", "Unknown Skin"), "icon": data.get("displayIcon")}
+    index = await _get_level_index(http)
+    return index.get(level_uuid, {"name": "Unknown Skin", "icon": None, "tier_icon": None})

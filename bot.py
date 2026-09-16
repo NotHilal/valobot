@@ -104,10 +104,11 @@ async def shop(interaction: discord.Interaction):
             if offer["item_id"]:
                 details = await riot.get_skin_details(http, offer["item_id"])
             else:
-                details = {"name": "Unknown Skin", "icon": None}
+                details = {"name": "Unknown Skin", "icon": None, "tier_icon": None}
 
-            price = f"💰 {offer['cost']} VP" if offer["cost"] is not None else "Price unavailable"
-            embed = discord.Embed(title=details["name"], description=price, color=discord.Color.red())
+            price = f"{offer['cost']} VP" if offer["cost"] is not None else "Price unavailable"
+            embed = discord.Embed(title=details["name"], color=discord.Color.red())
+            embed.set_author(name=price, icon_url=details.get("tier_icon"))
             if details["icon"]:
                 embed.set_thumbnail(url=details["icon"])
             embeds.append(embed)
