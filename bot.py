@@ -19,35 +19,52 @@ client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
 
-@tree.command(name="login", description="Link your Riot account to see your daily VALORANT shop")
-@app_commands.describe(url="After logging in via the link, paste the full URL you land on here")
-async def login(interaction: discord.Interaction, url: str = None):
-    if url is None:
-        await interaction.response.send_message(
-            f"1. Tap this link and log in with Riot (your password never touches this bot): {riot.build_login_url()}\n"
-            "2. You'll arrive on a **404 error page** after logging in - that's normal, we just need the link "
-            "from that page to continue. Please tap **Share** (or the **•••** menu) and copy the URL.\n"
-            "3. Switch back here, run `/login` again, and paste it into the `url` option.",
-            ephemeral=True,
-        )
-        return
+class LoginLinkModal(discord.ui.Modal, title="Paste your login link"):
+    url = discord.ui.TextInput(
+        label="The URL you landed on after logging in",
+        style=discord.TextStyle.paragraph,
+        placeholder="https://playvalorant.com/opt_in#access_token=...",
+        required=True,
+    )
 
-    await interaction.response.defer(ephemeral=True, thinking=True)
-    try:
-        session = await riot.create_session(url)
-    except riot.RiotAuthError as exc:
-        await interaction.followup.send(f"❌ {exc}", ephemeral=True)
-        return
-    except Exception:
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            session = await riot.create_session(self.url.value)
+        except riot.RiotAuthError as exc:
+            await interaction.followup.send(f"❌ {exc}", ephemeral=True)
+            return
+        except Exception:
+            await interaction.followup.send(
+                "❌ Something went wrong talking to Riot. Please try /login again.", ephemeral=True
+            )
+            return
+
+        storage.save_user(interaction.user.id, session)
+        name = session.get("riot_id") or "your account"
         await interaction.followup.send(
-            "❌ Something went wrong talking to Riot. Please try /login again.", ephemeral=True
+            f"✅ Logged in as **{name}**. Use `/shop` to see your daily store.", ephemeral=True
         )
-        return
 
-    storage.save_user(interaction.user.id, session)
-    name = session.get("riot_id") or "your account"
-    await interaction.followup.send(
-        f"✅ Logged in as **{name}**. Use `/shop` to see your daily store.", ephemeral=True
+
+class LoginView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=300)
+
+    @discord.ui.button(label="Paste login link", style=discord.ButtonStyle.primary, emoji="🔗")
+    async def paste_link(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(LoginLinkModal())
+
+
+@tree.command(name="login", description="Link your Riot account to see your daily VALORANT shop")
+async def login(interaction: discord.Interaction):
+    await interaction.response.send_message(
+        f"1. Tap this link and log in with Riot (your password never touches this bot): {riot.build_login_url()}\n"
+        "2. You'll land on a **404 error page** afterward - that's normal, we just need the link "
+        "from that page. Tap **Share** (or the **•••** menu) and copy the URL.\n"
+        "3. Come back here, tap **Paste login link** below, and paste it in.",
+        view=LoginView(),
+        ephemeral=True,
     )
 
 
