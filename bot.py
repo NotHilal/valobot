@@ -61,11 +61,23 @@ class LoginView(discord.ui.View):
 
 @tree.command(name="login", description="Link your Riot account to see your daily VALORANT shop")
 async def login(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="🔗 Link Your Riot Account",
+        description=(
+            f"**Step 1 —** [Click here to log in with Riot]({riot.build_login_url()})\n"
+            "You're logging in on Riot's own site — your password never touches this bot.\n\n"
+            "**Step 2 —** ⚠️ You'll land on a page that looks broken (an error page). "
+            "**That's expected, not a bug** — we just need the web address of that page, not "
+            "anything on it.\n\n"
+            "**Step 3 —** Copy that page's full address:\n"
+            "> 💻 **Computer:** click the address bar, then `Ctrl+C` (`Cmd+C` on Mac)\n"
+            "> 📱 **Phone:** tap the address bar, then **Copy**\n\n"
+            "**Step 4 —** Come back here and click **Paste login link** below."
+        ),
+        color=discord.Color.blurple(),
+    )
     await interaction.response.send_message(
-        f"1. Tap this link and log in with Riot (your password never touches this bot): {riot.build_login_url()}\n"
-        "2. You'll land on a **404 error page** afterward - that's normal, we just need the link "
-        "from that page. Tap **Share** (or the **•••** menu) and copy the URL.\n"
-        "3. Come back here, tap **Paste login link** below, and paste it in.",
+        embed=embed,
         view=LoginView(),
         ephemeral=True,
     )
