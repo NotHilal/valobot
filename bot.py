@@ -239,15 +239,21 @@ async def logout(interaction: discord.Interaction):
         await interaction.response.send_message("You weren't logged in.", ephemeral=True)
 
 
-@tree.command(name="rollskin", description="Roll for a random Valorant skin (once per day)")
+MAX_ROLLS_PER_DAY = 2
+
+
+@tree.command(name="rollskin", description="Roll for a random Valorant skin (up to 2 per day)")
 async def roll_cmd(interaction: discord.Interaction):
     collection = storage.get_collection(interaction.user.id)
-    if collection.get("last_roll") == gacha.today_utc():
+    today = gacha.today_utc()
+    rolls_today = collection.get("rolls_today", 1) if collection.get("last_roll") == today else 0
+
+    if rolls_today >= MAX_ROLLS_PER_DAY:
         remaining = gacha.seconds_until_next_utc_day()
         hours, rem = divmod(remaining, 3600)
         minutes = rem // 60
         await interaction.response.send_message(
-            f"You already rolled today. Next roll in {hours}h {minutes}m.", ephemeral=True
+            f"You've used both rolls today. Next roll in {hours}h {minutes}m.", ephemeral=True
         )
         return
 
@@ -258,12 +264,14 @@ async def roll_cmd(interaction: discord.Interaction):
     item = gacha.roll(pool)
 
     collection["items"].append(item)
-    collection["last_roll"] = gacha.today_utc()
+    collection["last_roll"] = today
+    collection["rolls_today"] = rolls_today + 1
     storage.save_collection(interaction.user.id, collection)
 
+    rolls_left = MAX_ROLLS_PER_DAY - collection["rolls_today"]
     embed = discord.Embed(
         title=f"🎉 {interaction.user.display_name} rolled: {item['name']}",
-        description=f"Rarity: **{item['rarity']}**",
+        description=f"Rarity: **{item['rarity']}**\n{rolls_left} roll{'s' if rolls_left != 1 else ''} left today.",
         color=discord.Color.gold(),
     )
     embed.set_image(url=item["icon"])
