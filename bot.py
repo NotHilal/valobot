@@ -1,12 +1,14 @@
 """Minimal Discord bot: /login, /shop, /logout for a personal VALORANT shop viewer,
 plus /rollskin, /collection, /trade for a daily skin-collecting side game."""
 
+import io
 import os
 
 import aiohttp
 import discord
 from discord import app_commands
 from dotenv import load_dotenv
+from PIL import Image
 
 import gacha
 import riot
@@ -71,6 +73,26 @@ async def login(interaction: discord.Interaction):
     )
 
 
+SHOP_GALLERY_URL = "https://playvalorant.com/shop"  # shared across embeds so Discord tiles their images into a grid
+ICON_TILE_SIZE = 160
+
+
+async def _square_icon_file(http: aiohttp.ClientSession, url: str, filename: str) -> discord.File:
+    async with http.get(url) as resp:
+        raw = await resp.read()
+
+    img = Image.open(io.BytesIO(raw)).convert("RGBA")
+    img.thumbnail((ICON_TILE_SIZE, ICON_TILE_SIZE), Image.LANCZOS)
+
+    tile = Image.new("RGBA", (ICON_TILE_SIZE, ICON_TILE_SIZE), (0, 0, 0, 0))
+    tile.paste(img, ((ICON_TILE_SIZE - img.width) // 2, (ICON_TILE_SIZE - img.height) // 2), img)
+
+    buf = io.BytesIO()
+    tile.save(buf, format="PNG")
+    buf.seek(0)
+    return discord.File(buf, filename=filename)
+
+
 @tree.command(name="shop", description="Show your daily VALORANT storefront")
 async def shop(interaction: discord.Interaction):
     session = storage.get_user(interaction.user.id)
@@ -99,25 +121,34 @@ async def shop(interaction: discord.Interaction):
 
         offers, remaining_seconds = riot.parse_daily_offers(storefront)
 
+        lines = []
+        files = []
         embeds = []
-        for offer in offers:
+        for i, offer in enumerate(offers):
             if offer["item_id"]:
                 details = await riot.get_skin_details(http, offer["item_id"])
             else:
                 details = {"name": "Unknown Skin", "icon": None}
 
             price = f"💰 **{offer['cost']}** VP" if offer["cost"] is not None else "Price unavailable"
-            embed = discord.Embed(title=details["name"], description=price, color=discord.Color.red())
+            lines.append(f"**{details['name']}** — {price}")
+
+            embed = discord.Embed(url=SHOP_GALLERY_URL, color=discord.Color.red())
             if details["icon"]:
-                embed.set_image(url=details["icon"])
+                filename = f"skin{i}.png"
+                files.append(await _square_icon_file(http, details["icon"], filename))
+                embed.set_image(url=f"attachment://{filename}")
             embeds.append(embed)
+
+    if embeds:
+        embeds[0].description = "\n".join(lines)
 
     remaining_seconds = max(remaining_seconds, 0)
     hours, rem = divmod(remaining_seconds, 3600)
     minutes = rem // 60
 
     header = f"🎮 **{interaction.user.display_name}'s Daily VALORANT Store** — refreshes in {hours}h {minutes}m"
-    await interaction.followup.send(content=header, embeds=embeds[:10], ephemeral=False)
+    await interaction.followup.send(content=header, embeds=embeds[:10], files=files[:10], ephemeral=False)
 
 
 @tree.command(name="logout", description="Remove your saved Riot login from this bot")
