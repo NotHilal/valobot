@@ -59,10 +59,9 @@ class LoginView(discord.ui.View):
         await interaction.response.send_modal(LoginLinkModal())
 
 
-@tree.command(name="login", description="Link your Riot account to see your daily VALORANT shop")
-async def login(interaction: discord.Interaction):
+def _build_login_embed(title: str = "🔗 Link Your Riot Account") -> discord.Embed:
     embed = discord.Embed(
-        title="🔗 Link Your Riot Account",
+        title=title,
         description="Follow these steps to connect your VALORANT account. It only takes a minute!",
         color=discord.Color.blurple(),
     )
@@ -96,9 +95,13 @@ async def login(interaction: discord.Interaction):
         inline=False,
     )
     embed.set_footer(text="Your Riot password is never seen or stored by this bot.")
+    return embed
 
+
+@tree.command(name="login", description="Link your Riot account to see your daily VALORANT shop")
+async def login(interaction: discord.Interaction):
     await interaction.response.send_message(
-        embed=embed,
+        embed=_build_login_embed(),
         view=LoginView(),
         ephemeral=True,
     )
@@ -113,7 +116,11 @@ async def shop(interaction: discord.Interaction):
 
     if riot.is_session_expired(session):
         storage.delete_user(interaction.user.id)
-        await interaction.response.send_message("Your Riot session expired. Run `/login` again.", ephemeral=True)
+        await interaction.response.send_message(
+            embed=_build_login_embed("⏰ Your Riot session expired"),
+            view=LoginView(),
+            ephemeral=True,
+        )
         return
 
     await interaction.response.defer(thinking=True)
@@ -123,7 +130,11 @@ async def shop(interaction: discord.Interaction):
             storefront = await riot.get_storefront(http, session)
         except riot.SessionExpiredError:
             storage.delete_user(interaction.user.id)
-            await interaction.followup.send("Your Riot session expired. Run `/login` again.")
+            await interaction.followup.send(
+                embed=_build_login_embed("⏰ Your Riot session expired"),
+                view=LoginView(),
+                ephemeral=True,
+            )
             return
         except Exception as exc:
             print(f"shop error for user {interaction.user.id}: {exc!r}")
