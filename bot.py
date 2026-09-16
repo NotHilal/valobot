@@ -165,6 +165,71 @@ async def shop(interaction: discord.Interaction):
     await interaction.followup.send(content=header, embeds=embeds[:10], ephemeral=False)
 
 
+@tree.command(name="nightmarket", description="Show your Night Market bonus offers, if the event is currently running")
+async def nightmarket(interaction: discord.Interaction):
+    session = storage.get_user(interaction.user.id)
+    if not session:
+        await interaction.response.send_message("You're not logged in. Run `/login` first.", ephemeral=True)
+        return
+
+    if riot.is_session_expired(session):
+        storage.delete_user(interaction.user.id)
+        await interaction.response.send_message(
+            embed=_build_login_embed("⏰ Your Riot session expired"),
+            view=LoginView(),
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(thinking=True)
+
+    async with aiohttp.ClientSession() as http:
+        try:
+            storefront = await riot.get_storefront(http, session)
+        except riot.SessionExpiredError:
+            storage.delete_user(interaction.user.id)
+            await interaction.followup.send(
+                embed=_build_login_embed("⏰ Your Riot session expired"),
+                view=LoginView(),
+                ephemeral=True,
+            )
+            return
+        except Exception as exc:
+            print(f"nightmarket error for user {interaction.user.id}: {exc!r}")
+            await interaction.followup.send("Couldn't reach Riot's servers right now. Try again shortly.")
+            return
+
+        offers, remaining_seconds = riot.parse_night_market_offers(storefront)
+        if not offers:
+            await interaction.followup.send("🌙 The Night Market isn't running right now. Check back later!")
+            return
+
+        embeds = []
+        for offer in offers:
+            if offer["item_id"]:
+                details = await riot.get_skin_details(http, offer["item_id"])
+            else:
+                details = {"name": "Unknown Skin", "icon": None, "tier_icon": None}
+
+            if offer["cost"] is not None and offer["discounted_cost"] is not None:
+                price = f"~~{offer['cost']} VP~~ **{offer['discounted_cost']} VP** (-{offer['discount_percent']}%)"
+            else:
+                price = "Price unavailable"
+
+            embed = discord.Embed(title=details["name"], color=discord.Color.gold())
+            embed.set_author(name=price, icon_url=details.get("tier_icon"))
+            if details["icon"]:
+                embed.set_thumbnail(url=details["icon"])
+            embeds.append(embed)
+
+    remaining_seconds = max(remaining_seconds, 0)
+    hours, rem = divmod(remaining_seconds, 3600)
+    minutes = rem // 60
+
+    header = f"🌙 **{interaction.user.display_name}'s Night Market** — ends in {hours}h {minutes}m"
+    await interaction.followup.send(content=header, embeds=embeds[:10], ephemeral=False)
+
+
 @tree.command(name="logout", description="Remove your saved Riot login from this bot")
 async def logout(interaction: discord.Interaction):
     deleted = storage.delete_user(interaction.user.id)

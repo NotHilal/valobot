@@ -187,6 +187,36 @@ def parse_daily_offers(storefront: dict) -> tuple[list[dict], int]:
     return offers, remaining
 
 
+def parse_night_market_offers(storefront: dict) -> tuple[list[dict], int]:
+    """Returns (list of {offer_id, item_id, cost, discounted_cost, discount_percent}, seconds_until_refresh).
+
+    An empty list means the Night Market (bonus store) isn't currently running - Riot only
+    includes the "BonusStore" key in the storefront response while the event is live.
+    """
+    bonus_store = storefront.get("BonusStore")
+    if not bonus_store:
+        return [], 0
+
+    offers = []
+    for entry in bonus_store.get("BonusStoreOffers", []):
+        offer = entry.get("Offer", {})
+        item_id = None
+        for reward in offer.get("Rewards", []):
+            item_id = reward.get("ItemID")
+            break
+        offers.append(
+            {
+                "offer_id": offer.get("OfferID"),
+                "item_id": item_id,
+                "cost": offer.get("Cost", {}).get(VP_CURRENCY_ID),
+                "discounted_cost": entry.get("DiscountCosts", {}).get(VP_CURRENCY_ID),
+                "discount_percent": entry.get("DiscountPercent"),
+            }
+        )
+    remaining = bonus_store.get("BonusStoreRemainingDurationInSeconds", 0)
+    return offers, remaining
+
+
 _LEVEL_INDEX_CACHE: dict = {"value": None, "fetched_at": 0.0}
 _LEVEL_INDEX_TTL_SECONDS = 24 * 3600
 
