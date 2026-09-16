@@ -63,19 +63,40 @@ class LoginView(discord.ui.View):
 async def login(interaction: discord.Interaction):
     embed = discord.Embed(
         title="🔗 Link Your Riot Account",
-        description=(
-            f"**Step 1 —** [Click here to log in with Riot]({riot.build_login_url()})\n"
-            "You're logging in on Riot's own site — your password never touches this bot.\n\n"
-            "**Step 2 —** ⚠️ You'll land on a page that looks broken (an error page). "
-            "**That's expected, not a bug** — we just need the web address of that page, not "
-            "anything on it.\n\n"
-            "**Step 3 —** Copy that page's full address:\n"
-            "> 💻 **Computer:** click the address bar, then `Ctrl+C` (`Cmd+C` on Mac)\n"
-            "> 📱 **Phone:** tap the address bar, then **Copy**\n\n"
-            "**Step 4 —** Come back here and click **Paste login link** below."
-        ),
+        description="Follow these steps to connect your VALORANT account. It only takes a minute!",
         color=discord.Color.blurple(),
     )
+    if client.user:
+        embed.set_thumbnail(url=client.user.display_avatar.url)
+
+    embed.add_field(
+        name="1️⃣ Log in with Riot",
+        value=(
+            f"**[Click here to log in](<{riot.build_login_url()}>)**\n"
+            "You're logging in on Riot's own website — your password never touches this bot."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="2️⃣ You'll land on a broken-looking page",
+        value="⚠️ **That's completely normal, not a bug!** We only need the web address of that page.",
+        inline=False,
+    )
+    embed.add_field(
+        name="3️⃣ Copy that page's address",
+        value=(
+            "💻 **Computer:** click the address bar, then press `Ctrl+C` (`Cmd+C` on Mac)\n"
+            "📱 **Phone:** tap the address bar, then tap **Copy**"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="4️⃣ Paste it back here",
+        value="Click the **Paste login link** button below and paste it in.",
+        inline=False,
+    )
+    embed.set_footer(text="Your Riot password is never seen or stored by this bot.")
+
     await interaction.response.send_message(
         embed=embed,
         view=LoginView(),
