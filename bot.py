@@ -350,6 +350,12 @@ class TradeView(discord.ui.View):
         if active_trades.get(self.responder.id) is self:
             del active_trades[self.responder.id]
 
+    async def _notify_proposer(self, content: str):
+        try:
+            await self.proposer.send(content)
+        except discord.Forbidden:
+            pass
+
     async def on_timeout(self):
         self._release()
         for child in self.children:
@@ -380,6 +386,10 @@ class TradeView(discord.ui.View):
             await interaction.response.edit_message(
                 content="This trade is no longer valid (an item was already traded away).", view=self
             )
+            await self._notify_proposer(
+                f"⚠️ Your trade offer to {self.responder.display_name} is no longer valid "
+                "(an item was already traded away)."
+            )
             return
 
         proposer_collection["items"].append(received)
@@ -391,6 +401,10 @@ class TradeView(discord.ui.View):
             content=f"✅ Trade completed between {self.proposer.display_name} and {self.responder.display_name}!",
             view=self,
         )
+        await self._notify_proposer(
+            f"✅ {self.responder.display_name} accepted your trade! You received **{received['name']}** "
+            f"for your **{given['name']}**."
+        )
 
     @discord.ui.button(label="Decline", style=discord.ButtonStyle.danger)
     async def decline(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -401,6 +415,7 @@ class TradeView(discord.ui.View):
             child.disabled = True
         self._release()
         await interaction.response.edit_message(content="❌ Trade declined.", view=self)
+        await self._notify_proposer(f"❌ {self.responder.display_name} declined your trade offer.")
 
 
 async def _offer_autocomplete(interaction: discord.Interaction, current: str):
