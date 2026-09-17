@@ -144,7 +144,7 @@ MAX_ROLL_CHARGES = 2
 # your charges to TEST_MODE_CHARGES instead of waiting for the real Paris
 # midnight/noon boundary, so you can roll repeatedly on the spot. Set it back
 # to False (and MAX_ROLL_CHARGES back to 2) for normal play.
-TEST_MODE = True
+TEST_MODE = False
 TEST_MODE_CHARGES = 5
 
 
