@@ -62,3 +62,12 @@ def save_collection(discord_id: int, collection: dict) -> None:
     data = _load(COLLECTIONS_FILE)
     data[str(discord_id)] = collection
     _save(COLLECTIONS_FILE, data)
+
+
+def delete_collection(discord_id: int) -> bool:
+    data = _load(COLLECTIONS_FILE)
+    if str(discord_id) in data:
+        del data[str(discord_id)]
+        _save(COLLECTIONS_FILE, data)
+        return True
+    return False

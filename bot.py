@@ -569,6 +569,26 @@ async def removeskin_cmd(interaction: discord.Interaction, user: discord.Member,
     )
 
 
+@tree.command(name="removeallcollection", description="(Server owner only) Wipe a user's entire skin collection")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(user="Whose collection to wipe")
+async def removeallcollection_cmd(interaction: discord.Interaction, user: discord.Member):
+    if not _is_owner(interaction):
+        await interaction.response.send_message("Only the server owner can do that.", ephemeral=True)
+        return
+
+    deleted = storage.delete_collection(user.id)
+    if not deleted:
+        await interaction.response.send_message(
+            f"{user.display_name} doesn't have a collection to wipe.", ephemeral=True
+        )
+        return
+
+    await interaction.response.send_message(
+        f"🗑️ Wiped {user.display_name}'s entire skin collection.", ephemeral=True
+    )
+
+
 async def _custom_skin_autocomplete(interaction: discord.Interaction, current: str):
     names = [item["name"] for item in gacha.load_custom_skins_raw()]
     matches = [n for n in names if current.lower() in n.lower()][:25]
