@@ -1,5 +1,5 @@
 """Minimal Discord bot: /login, /shop, /logout for a personal VALORANT shop viewer,
-plus /rollskin, /collection, /trade for a daily skin-collecting side game."""
+plus /roll, /collection, /trade for a daily skin-collecting side game."""
 
 import os
 
@@ -241,7 +241,7 @@ async def logout(interaction: discord.Interaction):
 
 
 @tree.command(
-    name="rollskin",
+    name="roll",
     description="Roll for a random Valorant skin (up to 2 charges, +1 at midnight & noon Paris time)",
 )
 async def roll_cmd(interaction: discord.Interaction):
@@ -260,7 +260,7 @@ async def roll_cmd(interaction: discord.Interaction):
             return
 
         # Spend a charge now, before the network fetch below, so a second
-        # /rollskin fired while this one is still in flight can't spend the
+        # /roll fired while this one is still in flight can't spend the
         # same charge twice.
         collection["charges"] -= 1
         storage.save_collection(interaction.user.id, collection)
@@ -272,7 +272,7 @@ async def roll_cmd(interaction: discord.Interaction):
             pool = await gacha.get_pool(http)
         item = gacha.roll(pool)
     except Exception as exc:
-        print(f"rollskin error for user {interaction.user.id}: {exc!r}")
+        print(f"roll error for user {interaction.user.id}: {exc!r}")
         async with storage.collection_lock:
             collection = storage.get_collection(interaction.user.id)
             collection["charges"] = min(gacha.MAX_ROLL_CHARGES, collection.get("charges", 0) + 1)
@@ -307,7 +307,7 @@ async def collection_cmd(interaction: discord.Interaction):
     items = collection.get("items", [])
     if not items:
         await interaction.response.send_message(
-            f"You haven't rolled any skins yet. Try `/rollskin`!\n{charges_line}", ephemeral=True
+            f"You haven't rolled any skins yet. Try `/roll`!\n{charges_line}", ephemeral=True
         )
         return
 
@@ -473,8 +473,25 @@ async def trade_cmd(interaction: discord.Interaction, user: discord.Member, offe
     embed.add_field(name=f"{interaction.user.display_name} gives", value=f"{my_item['name']} ({my_item['rarity']})")
     embed.add_field(name=f"{user.display_name} gives", value=f"{their_item['name']} ({their_item['rarity']})")
 
-    await interaction.response.send_message(content=f"{user.mention}, you have a trade offer!", embed=embed, view=view)
-    view.message = await interaction.original_response()
+    # DM'd instead of posted in the channel so nobody else on the server sees
+    # the offer or its buttons - only the two people trading do.
+    try:
+        dm_message = await user.send(
+            content=f"{interaction.user.display_name} sent you a trade offer!", embed=embed, view=view
+        )
+    except discord.Forbidden:
+        view._release()
+        await interaction.response.send_message(
+            f"Couldn't DM {user.display_name} - they may have DMs from server members turned off. "
+            "Ask them to enable it and try again.",
+            ephemeral=True,
+        )
+        return
+
+    view.message = dm_message
+    await interaction.response.send_message(
+        f"✅ Trade offer sent to {user.display_name} via DM.", ephemeral=True
+    )
 
 
 @tree.command(name="addskin", description="(Server owner only) Add a custom skin to the roll pool")
