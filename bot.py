@@ -239,10 +239,6 @@ async def logout(interaction: discord.Interaction):
         await interaction.response.send_message("You weren't logged in.", ephemeral=True)
 
 
-@tree.command(name="test", description="Check if the bot is live")
-async def test_cmd(interaction: discord.Interaction):
-    await interaction.response.send_message("this is a test", ephemeral=True)
-
 
 @tree.command(
     name="rollskin",
