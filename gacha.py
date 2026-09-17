@@ -161,10 +161,13 @@ def sync_roll_charges(collection: dict) -> dict:
     """Regenerates roll charges in place: +1 for every midnight/noon boundary
     crossed since the collection was last synced, capped at MAX_ROLL_CHARGES.
     There's no background timer, so this is computed lazily whenever the
-    collection is touched. In TEST_MODE this is skipped entirely in favor of
-    instantly topping up to TEST_MODE_CHARGES."""
+    collection is touched. In TEST_MODE this is skipped in favor of letting
+    charges decrement normally from TEST_MODE_CHARGES down to 0, then
+    topping back up to TEST_MODE_CHARGES the next time you're out - so you
+    can demo spending charges without ever getting soft-locked."""
     if TEST_MODE:
-        collection["charges"] = TEST_MODE_CHARGES
+        if collection.get("charges", 0) <= 0:
+            collection["charges"] = TEST_MODE_CHARGES
         return collection
 
     now_idx = _current_period_index()
