@@ -239,39 +239,55 @@ async def logout(interaction: discord.Interaction):
         await interaction.response.send_message("You weren't logged in.", ephemeral=True)
 
 
-MAX_ROLLS_PER_DAY = 2
-
-
-@tree.command(name="rollskin", description="Roll for a random Valorant skin (up to 2 per day)")
+@tree.command(
+    name="rollskin",
+    description="Roll for a random Valorant skin (up to 2 charges, +1 at midnight & noon Paris time)",
+)
 async def roll_cmd(interaction: discord.Interaction):
-    collection = storage.get_collection(interaction.user.id)
-    today = gacha.today_utc()
-    rolls_today = collection.get("rolls_today", 1) if collection.get("last_roll") == today else 0
+    async with storage.collection_lock:
+        collection = storage.get_collection(interaction.user.id)
+        gacha.sync_roll_charges(collection)
+        storage.save_collection(interaction.user.id, collection)
 
-    if rolls_today >= MAX_ROLLS_PER_DAY:
-        remaining = gacha.seconds_until_next_utc_day()
-        hours, rem = divmod(remaining, 3600)
-        minutes = rem // 60
-        await interaction.response.send_message(
-            f"You've used both rolls today. Next roll in {hours}h {minutes}m.", ephemeral=True
-        )
-        return
+        if collection["charges"] <= 0:
+            remaining = gacha.seconds_until_next_roll_period()
+            hours, rem = divmod(remaining, 3600)
+            minutes = rem // 60
+            await interaction.response.send_message(
+                f"You're out of roll charges. Next charge in {hours}h {minutes}m.", ephemeral=True
+            )
+            return
+
+        # Spend a charge now, before the network fetch below, so a second
+        # /rollskin fired while this one is still in flight can't spend the
+        # same charge twice.
+        collection["charges"] -= 1
+        storage.save_collection(interaction.user.id, collection)
 
     await interaction.response.defer(thinking=True)
 
-    async with aiohttp.ClientSession() as http:
-        pool = await gacha.get_pool(http)
-    item = gacha.roll(pool)
+    try:
+        async with aiohttp.ClientSession() as http:
+            pool = await gacha.get_pool(http)
+        item = gacha.roll(pool)
+    except Exception as exc:
+        print(f"rollskin error for user {interaction.user.id}: {exc!r}")
+        async with storage.collection_lock:
+            collection = storage.get_collection(interaction.user.id)
+            collection["charges"] = min(gacha.MAX_ROLL_CHARGES, collection.get("charges", 0) + 1)
+            storage.save_collection(interaction.user.id, collection)
+        await interaction.followup.send("Couldn't fetch the skin pool right now. Try again shortly.")
+        return
 
-    collection["items"].append(item)
-    collection["last_roll"] = today
-    collection["rolls_today"] = rolls_today + 1
-    storage.save_collection(interaction.user.id, collection)
+    async with storage.collection_lock:
+        collection = storage.get_collection(interaction.user.id)
+        collection["items"].append(item)
+        storage.save_collection(interaction.user.id, collection)
 
-    rolls_left = MAX_ROLLS_PER_DAY - collection["rolls_today"]
+    rolls_left = collection["charges"]
     embed = discord.Embed(
         title=f"🎉 {interaction.user.display_name} rolled: {item['name']}",
-        description=f"Rarity: **{item['rarity']}**\n{rolls_left} roll{'s' if rolls_left != 1 else ''} left today.",
+        description=f"Rarity: **{item['rarity']}**\n{rolls_left} charge{'s' if rolls_left != 1 else ''} left.",
         color=discord.Color.gold(),
     )
     embed.set_image(url=item["icon"])
@@ -280,11 +296,17 @@ async def roll_cmd(interaction: discord.Interaction):
 
 @tree.command(name="collection", description="Show your top 5 rarest Valorant skins")
 async def collection_cmd(interaction: discord.Interaction):
-    collection = storage.get_collection(interaction.user.id)
+    async with storage.collection_lock:
+        collection = storage.get_collection(interaction.user.id)
+        gacha.sync_roll_charges(collection)
+        storage.save_collection(interaction.user.id, collection)
+
+    charges_line = f"🔋 Roll charges: **{collection['charges']}/{gacha.MAX_ROLL_CHARGES}**"
+
     items = collection.get("items", [])
     if not items:
         await interaction.response.send_message(
-            "You haven't rolled any skins yet. Try `/rollskin`!", ephemeral=True
+            f"You haven't rolled any skins yet. Try `/rollskin`!\n{charges_line}", ephemeral=True
         )
         return
 
@@ -297,20 +319,38 @@ async def collection_cmd(interaction: discord.Interaction):
         embed.set_image(url=item["icon"])
         embeds.append(embed)
 
-    header = f"🏆 **{interaction.user.display_name}'s Top {len(top)} Skins** — {len(items)} total in collection"
+    header = (
+        f"🏆 **{interaction.user.display_name}'s Top {len(top)} Skins** — {len(items)} total in collection\n"
+        f"{charges_line}"
+    )
     await interaction.response.send_message(content=header, embeds=embeds)
+
+
+# Maps a user id to the TradeView they're currently tied up in (as proposer or
+# responder), so we can block new trades involving someone who already has one
+# pending. Cleared on accept, decline, or timeout.
+active_trades: dict[int, "TradeView"] = {}
+
+TRADE_TIMEOUT_SECONDS = 3600  # 1 hour
 
 
 class TradeView(discord.ui.View):
     def __init__(self, proposer: discord.Member, responder: discord.Member, offer_item: dict, request_item: dict):
-        super().__init__(timeout=300)
+        super().__init__(timeout=TRADE_TIMEOUT_SECONDS)
         self.proposer = proposer
         self.responder = responder
         self.offer_item = offer_item
         self.request_item = request_item
         self.message: discord.Message | None = None
 
+    def _release(self):
+        if active_trades.get(self.proposer.id) is self:
+            del active_trades[self.proposer.id]
+        if active_trades.get(self.responder.id) is self:
+            del active_trades[self.responder.id]
+
     async def on_timeout(self):
+        self._release()
         for child in self.children:
             child.disabled = True
         if self.message:
@@ -333,6 +373,7 @@ class TradeView(discord.ui.View):
 
         for child in self.children:
             child.disabled = True
+        self._release()
 
         if not given or not received:
             await interaction.response.edit_message(
@@ -357,6 +398,7 @@ class TradeView(discord.ui.View):
             return
         for child in self.children:
             child.disabled = True
+        self._release()
         await interaction.response.edit_message(content="❌ Trade declined.", view=self)
 
 
@@ -395,6 +437,17 @@ async def trade_cmd(interaction: discord.Interaction, user: discord.Member, offe
         await interaction.response.send_message("You can't trade with a bot.", ephemeral=True)
         return
 
+    if interaction.user.id in active_trades:
+        await interaction.response.send_message(
+            "You already have a trade in progress. Finish or wait for it to expire first.", ephemeral=True
+        )
+        return
+    if user.id in active_trades:
+        await interaction.response.send_message(
+            f"{user.display_name} already has a trade in progress. Try again once it's resolved.", ephemeral=True
+        )
+        return
+
     my_collection = storage.get_collection(interaction.user.id)
     their_collection = storage.get_collection(user.id)
 
@@ -413,6 +466,8 @@ async def trade_cmd(interaction: discord.Interaction, user: discord.Member, offe
         return
 
     view = TradeView(proposer=interaction.user, responder=user, offer_item=my_item, request_item=their_item)
+    active_trades[interaction.user.id] = view
+    active_trades[user.id] = view
     embed = discord.Embed(title="🔄 Trade Offer", color=discord.Color.blue())
     embed.add_field(name=f"{interaction.user.display_name} gives", value=f"{my_item['name']} ({my_item['rarity']})")
     embed.add_field(name=f"{user.display_name} gives", value=f"{their_item['name']} ({their_item['rarity']})")

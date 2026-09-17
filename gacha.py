@@ -7,6 +7,7 @@ import os
 import random
 import time
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import aiohttp
 
@@ -86,9 +87,15 @@ async def get_pool(http: aiohttp.ClientSession) -> dict[str, list[dict]]:
     return pool
 
 
+class EmptyPoolError(Exception):
+    """Raised when there are no skins available to roll (e.g. the API fetch failed)."""
+
+
 def roll(pool: dict[str, list[dict]]) -> dict:
     """Pick one random item, weighted by rarity tier, then stamp it with an obtained-at time."""
     available = {name: items for name, items in pool.items() if items}
+    if not available:
+        raise EmptyPoolError()
     rarity = random.choices(list(available.keys()), weights=[RARITY_WEIGHTS[n] for n in available], k=1)[0]
     return stamp(random.choice(available[rarity]))
 
@@ -129,11 +136,53 @@ def pop_item(collection: dict, name: str) -> dict | None:
     return None
 
 
-def today_utc() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+PARIS_TZ = ZoneInfo("Europe/Paris")
+MAX_ROLL_CHARGES = 2
+
+# --- Demo mode --------------------------------------------------------
+# Flip TEST_MODE to True before a live demo: every charge sync instantly sets
+# your charges to TEST_MODE_CHARGES instead of waiting for the real Paris
+# midnight/noon boundary, so you can roll repeatedly on the spot. Set it back
+# to False (and MAX_ROLL_CHARGES back to 2) for normal play.
+TEST_MODE = False
+TEST_MODE_CHARGES = 5
 
 
-def seconds_until_next_utc_day() -> int:
-    now = datetime.now(timezone.utc)
-    tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-    return int((tomorrow - now).total_seconds())
+def _current_period_index() -> int:
+    """Half-day ticks in Paris local time: one boundary at midnight, one at
+    noon. DST-aware, so it tracks Paris wall-clock time year-round rather than
+    a fixed UTC offset."""
+    now = datetime.now(PARIS_TZ)
+    half = 0 if now.hour < 12 else 1
+    return now.date().toordinal() * 2 + half
+
+
+def sync_roll_charges(collection: dict) -> dict:
+    """Regenerates roll charges in place: +1 for every midnight/noon boundary
+    crossed since the collection was last synced, capped at MAX_ROLL_CHARGES.
+    There's no background timer, so this is computed lazily whenever the
+    collection is touched. In TEST_MODE this is skipped entirely in favor of
+    instantly topping up to TEST_MODE_CHARGES."""
+    if TEST_MODE:
+        collection["charges"] = TEST_MODE_CHARGES
+        return collection
+
+    now_idx = _current_period_index()
+    last_idx = collection.get("last_charge_period_index")
+    if last_idx is None:
+        last_idx = now_idx - 1  # brand-new collection: start with 1 charge available
+    elapsed = max(0, now_idx - last_idx)
+    if elapsed:
+        collection["charges"] = min(MAX_ROLL_CHARGES, collection.get("charges", 0) + elapsed)
+        collection["last_charge_period_index"] = now_idx
+    collection.setdefault("charges", 0)
+    return collection
+
+
+def seconds_until_next_roll_period() -> int:
+    now = datetime.now(PARIS_TZ)
+    if now.hour < 12:
+        next_reset = now.replace(hour=12, minute=0, second=0, microsecond=0)
+    else:
+        next_reset = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return int((next_reset - now).total_seconds())

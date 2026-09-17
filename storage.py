@@ -1,11 +1,19 @@
 """Tiny JSON-file storage for per-Discord-user Riot sessions and skin collections."""
 
+import asyncio
 import json
 import os
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
 USERS_FILE = os.path.join(_DIR, "users.json")
 COLLECTIONS_FILE = os.path.join(_DIR, "collections.json")
+
+# Guards read-modify-write sequences on collections.json. Any caller that reads a
+# collection, mutates it, and writes it back must hold this across the whole
+# sequence (including any `await` in between) - otherwise two interleaved
+# commands touching the same or different users' collections can race and one
+# write silently clobbers the other.
+collection_lock = asyncio.Lock()
 
 
 def _load(path: str) -> dict:
@@ -43,7 +51,11 @@ def delete_user(discord_id: int) -> bool:
 
 
 def get_collection(discord_id: int) -> dict:
-    return _load(COLLECTIONS_FILE).get(str(discord_id)) or {"last_roll": None, "items": []}
+    return _load(COLLECTIONS_FILE).get(str(discord_id)) or {
+        "items": [],
+        "charges": 0,
+        "last_charge_period_index": None,
+    }
 
 
 def save_collection(discord_id: int, collection: dict) -> None:
