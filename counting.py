@@ -18,12 +18,14 @@ ROAST_MESSAGES = [
     "wtf are u saying {mention}",
 ]
 
-# Only used when the mistake was the same person posting twice in a row.
+# Only used when the mistake was the same person posting twice in a row -
+# picked from exclusively (not mixed with the general pool above).
 DOUBLE_POST_ROAST_MESSAGES = [
     "{mention} went twice in a row like nobody would notice.",
+    "no need to double send {mention} 🤡",
 ]
 
 
 def random_roast(mention: str, count: int, is_double_post: bool = False) -> str:
-    pool = ROAST_MESSAGES + DOUBLE_POST_ROAST_MESSAGES if is_double_post else ROAST_MESSAGES
+    pool = DOUBLE_POST_ROAST_MESSAGES if is_double_post else ROAST_MESSAGES
     return random.choice(pool).format(mention=mention, count=count)
