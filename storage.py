@@ -8,6 +8,7 @@ _DIR = os.path.dirname(os.path.abspath(__file__))
 USERS_FILE = os.path.join(_DIR, "users.json")
 COLLECTIONS_FILE = os.path.join(_DIR, "collections.json")
 COUNTING_FILE = os.path.join(_DIR, "counting.json")
+CHANNEL_LOCKS_FILE = os.path.join(_DIR, "channel_locks.json")
 
 # Guards read-modify-write sequences on collections.json. Any caller that reads a
 # collection, mutates it, and writes it back must hold this across the whole
@@ -87,3 +88,16 @@ def save_counting_state(guild_id: int, state: dict) -> None:
     data = _load(COUNTING_FILE)
     data[str(guild_id)] = state
     _save(COUNTING_FILE, data)
+
+
+def get_channel_lock(guild_id: int, group: str) -> int | None:
+    """The channel id a command group is restricted to, or None if unrestricted."""
+    return _load(CHANNEL_LOCKS_FILE).get(str(guild_id), {}).get(group)
+
+
+def set_channel_lock(guild_id: int, group: str, channel_id: int | None) -> None:
+    data = _load(CHANNEL_LOCKS_FILE)
+    guild_locks = data.get(str(guild_id), {})
+    guild_locks[group] = channel_id
+    data[str(guild_id)] = guild_locks
+    _save(CHANNEL_LOCKS_FILE, data)

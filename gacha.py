@@ -135,13 +135,29 @@ class EmptyPoolError(Exception):
     """Raised when there are no skins available to roll (e.g. the API fetch failed)."""
 
 
-def roll(pool: dict[str, list[dict]]) -> dict:
-    """Pick one random item, weighted by rarity tier, then stamp it with an obtained-at time."""
+def roll(pool: dict[str, list[dict]], boost: dict | None = None) -> dict:
+    """Pick one random item, weighted by rarity tier, then stamp it with an obtained-at time.
+
+    `boost` (optional) is {"item_id": ..., "percent": N}: *if* the rolled
+    tier contains that item, it has exactly an N% chance of being the one
+    picked out of that tier (the remaining (100-N)% is split evenly across
+    every other item in the tier). It has no effect if a different tier gets
+    rolled that time - the boost only matters when its own tier comes up.
+    """
     available = {name: items for name, items in pool.items() if items}
     if not available:
         raise EmptyPoolError()
     rarity = random.choices(list(available.keys()), weights=[RARITY_WEIGHTS[n] for n in available], k=1)[0]
-    return stamp(random.choice(available[rarity]))
+    candidates = available[rarity]
+
+    if boost and len(candidates) > 1 and any(c["id"] == boost["item_id"] for c in candidates):
+        percent = boost["percent"]
+        other_weight = (100 - percent) / (len(candidates) - 1)
+        weights = [percent if c["id"] == boost["item_id"] else other_weight for c in candidates]
+        chosen = random.choices(candidates, weights=weights, k=1)[0]
+    else:
+        chosen = random.choice(candidates)
+    return stamp(chosen)
 
 
 def top_items(items: list[dict], n: int = 5) -> list[dict]:

@@ -24,6 +24,20 @@ client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
 
+async def _check_channel_lock(interaction: discord.Interaction, group: str) -> bool:
+    """True if this command may proceed. Otherwise sends an ephemeral error
+    naming the channel it's restricted to and returns False."""
+    if interaction.guild is None:
+        return True
+    locked_channel_id = storage.get_channel_lock(interaction.guild.id, group)
+    if locked_channel_id is None or interaction.channel_id == locked_channel_id:
+        return True
+    channel = interaction.guild.get_channel(locked_channel_id)
+    where = channel.mention if channel else "the designated channel"
+    await interaction.response.send_message(f"This command can only be used in {where}.", ephemeral=True)
+    return False
+
+
 class LoginLinkModal(discord.ui.Modal, title="Paste your login link"):
     url = discord.ui.TextInput(
         label="The URL you landed on after logging in",
@@ -103,6 +117,9 @@ def _build_login_embed(title: str = "🔗 Link Your Riot Account") -> discord.Em
 
 @tree.command(name="login", description="Link your Riot account to see your daily VALORANT shop")
 async def login(interaction: discord.Interaction):
+    if not await _check_channel_lock(interaction, "shop"):
+        return
+
     await interaction.response.send_message(
         embed=_build_login_embed(),
         view=LoginView(),
@@ -112,6 +129,9 @@ async def login(interaction: discord.Interaction):
 
 @tree.command(name="shop", description="Show your daily VALORANT storefront")
 async def shop(interaction: discord.Interaction):
+    if not await _check_channel_lock(interaction, "shop"):
+        return
+
     session = storage.get_user(interaction.user.id)
     if not session:
         await interaction.response.send_message("You're not logged in. Run `/login` first.", ephemeral=True)
@@ -170,6 +190,9 @@ async def shop(interaction: discord.Interaction):
 
 @tree.command(name="nightmarket", description="Show your Night Market bonus offers, if the event is currently running")
 async def nightmarket(interaction: discord.Interaction):
+    if not await _check_channel_lock(interaction, "shop"):
+        return
+
     session = storage.get_user(interaction.user.id)
     if not session:
         await interaction.response.send_message("You're not logged in. Run `/login` first.", ephemeral=True)
@@ -235,6 +258,9 @@ async def nightmarket(interaction: discord.Interaction):
 
 @tree.command(name="logout", description="Remove your saved Riot login from this bot")
 async def logout(interaction: discord.Interaction):
+    if not await _check_channel_lock(interaction, "shop"):
+        return
+
     deleted = storage.delete_user(interaction.user.id)
     if deleted:
         await interaction.response.send_message("✅ Your Riot session has been removed.", ephemeral=True)
@@ -248,6 +274,11 @@ async def logout(interaction: discord.Interaction):
     description="Roll for a random Valorant skin (up to 2 charges, +1 at midnight & noon Paris time)",
 )
 async def roll_cmd(interaction: discord.Interaction):
+    if not await _check_channel_lock(interaction, "roll"):
+        return
+
+    roll_boost = None
+    boost_before_use = None
     async with storage.collection_lock:
         collection = storage.get_collection(interaction.user.id)
         gacha.sync_roll_charges(collection)
@@ -266,6 +297,16 @@ async def roll_cmd(interaction: discord.Interaction):
         # /roll fired while this one is still in flight can't spend the
         # same charge twice.
         collection["charges"] -= 1
+
+        active_boost = collection.get("roll_boost")
+        if active_boost:
+            boost_before_use = dict(active_boost)
+            roll_boost = {"item_id": active_boost["item_id"], "percent": active_boost["percent"]}
+            active_boost["rolls_left"] -= 1
+            if active_boost["rolls_left"] <= 0:
+                collection.pop("roll_boost", None)
+            else:
+                collection["roll_boost"] = active_boost
         storage.save_collection(interaction.user.id, collection)
 
     await interaction.response.defer(thinking=True)
@@ -273,12 +314,16 @@ async def roll_cmd(interaction: discord.Interaction):
     try:
         async with aiohttp.ClientSession() as http:
             pool = await gacha.get_pool(http)
-        item = gacha.roll(pool)
+        item = gacha.roll(pool, boost=roll_boost)
     except Exception as exc:
         print(f"roll error for user {interaction.user.id}: {exc!r}")
         async with storage.collection_lock:
             collection = storage.get_collection(interaction.user.id)
             collection["charges"] = min(gacha.MAX_ROLL_CHARGES, collection.get("charges", 0) + 1)
+            # Restore the boost to its pre-decrement state too, since this
+            # roll attempt never actually happened.
+            if boost_before_use is not None:
+                collection["roll_boost"] = boost_before_use
             storage.save_collection(interaction.user.id, collection)
         await interaction.followup.send("Couldn't fetch the skin pool right now. Try again shortly.")
         return
@@ -301,6 +346,9 @@ async def roll_cmd(interaction: discord.Interaction):
 
 @tree.command(name="collection", description="Show your top 5 rarest Valorant skins")
 async def collection_cmd(interaction: discord.Interaction):
+    if not await _check_channel_lock(interaction, "roll"):
+        return
+
     async with storage.collection_lock:
         collection = storage.get_collection(interaction.user.id)
         gacha.sync_roll_charges(collection)
@@ -457,6 +505,9 @@ def _is_mod_or_admin(interaction: discord.Interaction) -> bool:
 )
 @app_commands.autocomplete(offer=_offer_autocomplete, request=_member_collection_autocomplete)
 async def trade_cmd(interaction: discord.Interaction, user: discord.Member, offer: str, request: str):
+    if not await _check_channel_lock(interaction, "roll"):
+        return
+
     if user.id == interaction.user.id:
         await interaction.response.send_message("You can't trade with yourself.", ephemeral=True)
         return
@@ -589,6 +640,56 @@ async def give_cmd(interaction: discord.Interaction, user: discord.Member, skin:
     )
 
 
+DEFAULT_ROLL_BOOST_PERCENT = 10
+MAX_ROLL_BOOST_PERCENT = 20
+MAX_ROLL_BOOST_ROLLS = 100
+
+
+@tree.command(
+    name="nr",
+    description="(Mods/Admins only) Set a user's % chance of a specific skin over their next N rolls",
+)
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(
+    user="Who this affects",
+    skin="The skin to boost the odds of",
+    percent="Chance (%) of getting this skin, given a roll lands in its rarity tier",
+    rolls="How many of their next rolls this applies to",
+)
+@app_commands.autocomplete(skin=_pool_skin_autocomplete)
+async def nr_cmd(
+    interaction: discord.Interaction,
+    user: discord.Member,
+    skin: str,
+    percent: app_commands.Range[int, 1, MAX_ROLL_BOOST_PERCENT] = DEFAULT_ROLL_BOOST_PERCENT,
+    rolls: app_commands.Range[int, 1, MAX_ROLL_BOOST_ROLLS] = 1,
+):
+    if not _is_mod_or_admin(interaction):
+        await interaction.response.send_message("Only mods or admins can do that.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    async with aiohttp.ClientSession() as http:
+        pool = await gacha.get_pool(http)
+    item = gacha.find_in_pool(pool, skin)
+    if not item:
+        await interaction.followup.send(f"No skin named \"{skin}\" found.", ephemeral=True)
+        return
+
+    async with storage.collection_lock:
+        collection = storage.get_collection(user.id)
+        collection["roll_boost"] = {"item_id": item["id"], "percent": percent, "rolls_left": rolls}
+        storage.save_collection(user.id, collection)
+
+    span = "next `/roll`" if rolls == 1 else f"next **{rolls}** rolls"
+    await interaction.followup.send(
+        f"🎯 {user.display_name}'s {span} will each have a **{percent}%** chance of being "
+        f"**{item['name']}** ({item['rarity']}) - only applies on rolls that land in the "
+        f"{item['rarity']} tier at all.",
+        ephemeral=True,
+    )
+
+
 @tree.command(name="removeskin", description="(Server owner only) Remove a skin from a user's collection")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(user="Whose collection to remove from", skin="The skin to remove")
@@ -692,6 +793,42 @@ async def stopcount_cmd(interaction: discord.Interaction):
     state["last_user_id"] = None
     storage.save_counting_state(interaction.guild.id, state)
     await interaction.response.send_message("🛑 Counting game turned off.", ephemeral=True)
+
+
+@tree.command(
+    name="startshop",
+    description="(Mods/Admins only) Restrict /login, /shop, /nightmarket, /logout to one channel",
+)
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(channel="The only channel shop commands will work in")
+async def startshop_cmd(interaction: discord.Interaction, channel: discord.TextChannel):
+    if not _is_mod_or_admin(interaction):
+        await interaction.response.send_message("Only mods or admins can do that.", ephemeral=True)
+        return
+
+    storage.set_channel_lock(interaction.guild.id, "shop", channel.id)
+    await interaction.response.send_message(
+        f"✅ Shop commands (/login, /shop, /nightmarket, /logout) are now restricted to {channel.mention}.",
+        ephemeral=True,
+    )
+
+
+@tree.command(
+    name="startroll",
+    description="(Mods/Admins only) Restrict /roll, /collection, /trade to one channel",
+)
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(channel="The only channel roll commands will work in")
+async def startroll_cmd(interaction: discord.Interaction, channel: discord.TextChannel):
+    if not _is_mod_or_admin(interaction):
+        await interaction.response.send_message("Only mods or admins can do that.", ephemeral=True)
+        return
+
+    storage.set_channel_lock(interaction.guild.id, "roll", channel.id)
+    await interaction.response.send_message(
+        f"✅ Roll commands (/roll, /collection, /trade) are now restricted to {channel.mention}.",
+        ephemeral=True,
+    )
 
 
 @client.event
