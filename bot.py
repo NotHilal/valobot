@@ -86,28 +86,20 @@ def _build_login_embed(title: str = "🔗 Link Your Riot Account") -> discord.Em
         embed.set_thumbnail(url=client.user.display_avatar.url)
 
     embed.add_field(
-        name="1️⃣ Log in with Riot",
+        name="1️⃣ Log in",
+        value=f"**[Click here to log in with Riot](<{riot.build_login_url()}>)**",
+        inline=False,
+    )
+    embed.add_field(
+        name="2️⃣ Copy the link you land on",
         value=(
-            f"**[Click here to log in](<{riot.build_login_url()}>)**\n"
-            "You're logging in on Riot's own website — your password never touches this bot."
+            "You'll land on a page that looks broken (error 404) — that's normal! "
+            "Just copy its link from your address bar."
         ),
         inline=False,
     )
     embed.add_field(
-        name="2️⃣ You'll land on a broken-looking page",
-        value="⚠️ **That's completely normal, not a bug!** We only need the web address of that page.",
-        inline=False,
-    )
-    embed.add_field(
-        name="3️⃣ Copy that page's address",
-        value=(
-            "💻 **Computer:** click the address bar, then press `Ctrl+C` (`Cmd+C` on Mac)\n"
-            "📱 **Phone:** tap the address bar, then tap **Copy**"
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="4️⃣ Paste it back here",
+        name="3️⃣ Come back and paste it",
         value="Click the **Paste login link** button below and paste it in.",
         inline=False,
     )
