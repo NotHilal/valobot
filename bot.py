@@ -1,5 +1,6 @@
 """Minimal Discord bot: /login, /shop, /logout for a personal VALORANT shop viewer,
-plus /roll, /collection, /trade for a daily skin-collecting side game."""
+plus /roll, /collection, /trade for a daily skin-collecting side game,
+plus a counting game in a designated channel."""
 
 import os
 
@@ -8,6 +9,7 @@ import discord
 from discord import app_commands
 from dotenv import load_dotenv
 
+import counting
 import gacha
 import riot
 import storage
@@ -16,7 +18,8 @@ load_dotenv()
 
 TOKEN = os.environ["DISCORD_TOKEN"]
 
-intents = discord.Intents.default()  # no privileged intents needed - slash commands only
+intents = discord.Intents.default()
+intents.message_content = True  # needed to read plain chat messages for the counting game
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
@@ -645,6 +648,57 @@ async def deleteskin_cmd(interaction: discord.Interaction, skin: str):
 
     gacha.save_custom_skins_raw(remaining)
     await interaction.response.send_message(f"🗑️ Deleted custom skin **{skin}** from the pool.", ephemeral=True)
+
+
+@tree.command(name="setcountingchannel", description="(Server owner only) Set the channel for the counting game")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(channel="The channel where people will count 1, 2, 3, ...")
+async def setcountingchannel_cmd(interaction: discord.Interaction, channel: discord.TextChannel):
+    if not _is_owner(interaction):
+        await interaction.response.send_message("Only the server owner can do that.", ephemeral=True)
+        return
+
+    state = storage.get_counting_state(interaction.guild.id)
+    state["channel_id"] = channel.id
+    state["count"] = 0
+    state["last_user_id"] = None
+    storage.save_counting_state(interaction.guild.id, state)
+    await interaction.response.send_message(
+        f"✅ Counting game set up in {channel.mention}. Someone start with **1**!", ephemeral=True
+    )
+
+
+@client.event
+async def on_message(message: discord.Message):
+    if message.author.bot or message.guild is None:
+        return
+
+    state = storage.get_counting_state(message.guild.id)
+    if state["channel_id"] != message.channel.id:
+        return
+
+    text = message.content.strip()
+    expected = state["count"] + 1
+    is_next_number = text.isdigit() and int(text) == expected
+    is_repeat_poster = state["count"] > 0 and message.author.id == state["last_user_id"]
+
+    if is_next_number and not is_repeat_poster:
+        state["count"] = expected
+        state["last_user_id"] = message.author.id
+        state["best_count"] = max(state["best_count"], expected)
+        storage.save_counting_state(message.guild.id, state)
+        return
+
+    reached = state["count"]
+    state["count"] = 0
+    state["last_user_id"] = None
+    storage.save_counting_state(message.guild.id, state)
+
+    try:
+        await message.add_reaction("💀")
+    except discord.HTTPException:
+        pass
+    await message.channel.send(counting.random_roast(message.author.mention, reached))
 
 
 @client.event

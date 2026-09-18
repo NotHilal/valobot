@@ -7,6 +7,7 @@ import os
 _DIR = os.path.dirname(os.path.abspath(__file__))
 USERS_FILE = os.path.join(_DIR, "users.json")
 COLLECTIONS_FILE = os.path.join(_DIR, "collections.json")
+COUNTING_FILE = os.path.join(_DIR, "counting.json")
 
 # Guards read-modify-write sequences on collections.json. Any caller that reads a
 # collection, mutates it, and writes it back must hold this across the whole
@@ -71,3 +72,18 @@ def delete_collection(discord_id: int) -> bool:
         _save(COLLECTIONS_FILE, data)
         return True
     return False
+
+
+def get_counting_state(guild_id: int) -> dict:
+    return _load(COUNTING_FILE).get(str(guild_id)) or {
+        "channel_id": None,
+        "count": 0,
+        "last_user_id": None,
+        "best_count": 0,
+    }
+
+
+def save_counting_state(guild_id: int, state: dict) -> None:
+    data = _load(COUNTING_FILE)
+    data[str(guild_id)] = state
+    _save(COUNTING_FILE, data)

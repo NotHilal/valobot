@@ -3,4 +3,5 @@ __pycache__/
 *.pyc
 .env
 users.json
+counting.json
 bot.py.bak.*

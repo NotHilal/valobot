@@ -25,7 +25,7 @@ AGENT_CATEGORY = "Agent"
 _DISPLAY_RARITY_ORDER = ["Select", "Deluxe", "Premium", "Exclusive", AGENT_CATEGORY, "Ultra"]
 RARITY_RANK = {name: i for i, name in enumerate(_DISPLAY_RARITY_ORDER)}
 # Weights double as exact percentages (they sum to 100).
-RARITY_WEIGHTS = {"Select": 36, "Deluxe": 25, "Premium": 17, "Exclusive": 7, AGENT_CATEGORY: 7, "Ultra": 8}
+RARITY_WEIGHTS = {"Select": 36, "Deluxe": 25, "Premium": 17, "Exclusive": 8, AGENT_CATEGORY: 6, "Ultra": 8}
 
 _pool_cache: dict = {"value": None, "fetched_at": 0.0, "tier_icons": {}}
 _POOL_TTL_SECONDS = 24 * 3600
