@@ -288,9 +288,10 @@ async def roll_cmd(interaction: discord.Interaction):
     rolls_left = collection["charges"]
     embed = discord.Embed(
         title=f"🎉 {interaction.user.display_name} rolled: {item['name']}",
-        description=f"Rarity: **{item['rarity']}**\n{rolls_left} charge{'s' if rolls_left != 1 else ''} left.",
+        description=f"{rolls_left} charge{'s' if rolls_left != 1 else ''} left.",
         color=discord.Color.gold(),
     )
+    embed.set_author(name=item["rarity"], icon_url=item.get("tier_icon"))
     embed.set_image(url=item["icon"])
     await interaction.followup.send(embed=embed)
 

@@ -15,18 +15,60 @@ VALORANT_API_BASE = "https://valorant-api.com/v1"
 CUSTOM_SKINS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "custom_skins.json")
 
 # Rarity tiers, lowest to highest - matches valorant-api.com's real content tiers.
+# These are the only tiers offered as choices for admin-added custom skins.
 RARITY_TIERS = ["Select", "Deluxe", "Premium", "Exclusive", "Ultra"]
-RARITY_RANK = {name: i for i, name in enumerate(RARITY_TIERS)}
-RARITY_WEIGHTS = {"Select": 45, "Deluxe": 30, "Premium": 15, "Exclusive": 7, "Ultra": 3}
 
-_pool_cache: dict = {"value": None, "fetched_at": 0.0}
+# Agents are a separate category from skin rarities (not selectable for custom
+# skins), but they're folded into the same weighted roll. At a 95% drop chance
+# they're by far the most common outcome, so they rank below every skin tier
+# (least rare) rather than between Exclusive and Ultra.
+AGENT_CATEGORY = "Agent"
+_DISPLAY_RARITY_ORDER = [AGENT_CATEGORY, "Select", "Deluxe", "Premium", "Exclusive", "Ultra"]
+RARITY_RANK = {name: i for i, name in enumerate(_DISPLAY_RARITY_ORDER)}
+# Weights double as exact percentages (they sum to 100): Agent takes 95%, and
+# skins split the remaining 5% in the same relative proportions they used to
+# split 100% (45:30:15:7:3).
+RARITY_WEIGHTS = {
+    AGENT_CATEGORY: 95,
+    "Select": 2.25,
+    "Deluxe": 1.5,
+    "Premium": 0.75,
+    "Exclusive": 0.35,
+    "Ultra": 0.15,
+}
+
+_pool_cache: dict = {"value": None, "fetched_at": 0.0, "tier_icons": {}}
 _POOL_TTL_SECONDS = 24 * 3600
 
 
-async def _fetch_official_pool(http: aiohttp.ClientSession) -> dict[str, list[dict]]:
+async def _fetch_agents(http: aiohttp.ClientSession) -> list[dict]:
+    async with http.get(
+        f"{VALORANT_API_BASE}/agents", params={"isPlayableCharacter": "true", "language": "en-US"}
+    ) as resp:
+        agents = (await resp.json())["data"]
+
+    result = []
+    for agent in agents:
+        icon = agent.get("fullPortrait") or agent.get("displayIcon")
+        if not icon:
+            continue
+        result.append(
+            {
+                "id": agent["uuid"],
+                "name": agent["displayName"],
+                "icon": icon,
+                "rarity": AGENT_CATEGORY,
+                "tier_icon": agent.get("displayIcon"),
+            }
+        )
+    return result
+
+
+async def _fetch_official_pool(http: aiohttp.ClientSession) -> tuple[dict[str, list[dict]], dict[str, str | None]]:
     async with http.get(f"{VALORANT_API_BASE}/contenttiers") as resp:
         tiers = (await resp.json())["data"]
     tier_names = {t["uuid"]: t["devName"] for t in tiers}
+    tier_icons = {t["devName"]: t["displayIcon"] for t in tiers}
 
     async with http.get(f"{VALORANT_API_BASE}/weapons/skins", params={"language": "en-US"}) as resp:
         skins = (await resp.json())["data"]
@@ -37,8 +79,18 @@ async def _fetch_official_pool(http: aiohttp.ClientSession) -> dict[str, list[di
         icon = skin.get("displayIcon")
         if rarity not in pool or not icon:
             continue
-        pool[rarity].append({"id": skin["uuid"], "name": skin["displayName"], "icon": icon, "rarity": rarity})
-    return pool
+        pool[rarity].append(
+            {
+                "id": skin["uuid"],
+                "name": skin["displayName"],
+                "icon": icon,
+                "rarity": rarity,
+                "tier_icon": tier_icons.get(rarity),
+            }
+        )
+
+    pool[AGENT_CATEGORY] = await _fetch_agents(http)
+    return pool, tier_icons
 
 
 def load_custom_skins_raw() -> list[dict]:
@@ -56,7 +108,7 @@ def save_custom_skins_raw(items: list[dict]) -> None:
         json.dump(items, f, indent=2)
 
 
-def _load_custom_skins() -> dict[str, list[dict]]:
+def _load_custom_skins(tier_icons: dict[str, str | None]) -> dict[str, list[dict]]:
     extra: dict[str, list[dict]] = {name: [] for name in RARITY_TIERS}
     for item in load_custom_skins_raw():
         rarity = str(item.get("rarity", "")).strip().title()
@@ -68,6 +120,7 @@ def _load_custom_skins() -> dict[str, list[dict]]:
                 "name": item["name"],
                 "icon": item["icon"],
                 "rarity": rarity,
+                "tier_icon": tier_icons.get(rarity),
             }
         )
     return extra
@@ -77,12 +130,13 @@ async def get_pool(http: aiohttp.ClientSession) -> dict[str, list[dict]]:
     """Combined official + custom skin pool, grouped by rarity tier."""
     cached = _pool_cache["value"]
     if not cached or (time.time() - _pool_cache["fetched_at"]) > _POOL_TTL_SECONDS:
-        cached = await _fetch_official_pool(http)
+        cached, tier_icons = await _fetch_official_pool(http)
         _pool_cache["value"] = cached
         _pool_cache["fetched_at"] = time.time()
+        _pool_cache["tier_icons"] = tier_icons
 
     pool = {name: list(items) for name, items in cached.items()}
-    for name, items in _load_custom_skins().items():
+    for name, items in _load_custom_skins(_pool_cache["tier_icons"]).items():
         pool[name].extend(items)
     return pool
 
@@ -144,7 +198,7 @@ MAX_ROLL_CHARGES = 2
 # your charges to TEST_MODE_CHARGES instead of waiting for the real Paris
 # midnight/noon boundary, so you can roll repeatedly on the spot. Set it back
 # to False (and MAX_ROLL_CHARGES back to 2) for normal play.
-TEST_MODE = False
+TEST_MODE = True
 TEST_MODE_CHARGES = 5
 
 
