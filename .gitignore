@@ -5,4 +5,5 @@ __pycache__/
 users.json
 counting.json
 channel_locks.json
+instant_bans.json
 bot.py.bak.*

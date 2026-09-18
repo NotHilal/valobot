@@ -9,6 +9,7 @@ USERS_FILE = os.path.join(_DIR, "users.json")
 COLLECTIONS_FILE = os.path.join(_DIR, "collections.json")
 COUNTING_FILE = os.path.join(_DIR, "counting.json")
 CHANNEL_LOCKS_FILE = os.path.join(_DIR, "channel_locks.json")
+INSTANT_BANS_FILE = os.path.join(_DIR, "instant_bans.json")
 
 # Guards read-modify-write sequences on collections.json. Any caller that reads a
 # collection, mutates it, and writes it back must hold this across the whole
@@ -101,3 +102,19 @@ def set_channel_lock(guild_id: int, group: str, channel_id: int | None) -> None:
     guild_locks[group] = channel_id
     data[str(guild_id)] = guild_locks
     _save(CHANNEL_LOCKS_FILE, data)
+
+
+def get_instant_ban_list(guild_id: int) -> list[int]:
+    return _load(INSTANT_BANS_FILE).get(str(guild_id), [])
+
+
+def add_instant_ban(guild_id: int, user_id: int) -> bool:
+    """Returns False if the user was already on the list."""
+    data = _load(INSTANT_BANS_FILE)
+    ids = data.get(str(guild_id), [])
+    if user_id in ids:
+        return False
+    ids.append(user_id)
+    data[str(guild_id)] = ids
+    _save(INSTANT_BANS_FILE, data)
+    return True

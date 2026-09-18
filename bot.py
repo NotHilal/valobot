@@ -20,6 +20,7 @@ TOKEN = os.environ["DISCORD_TOKEN"]
 
 intents = discord.Intents.default()
 intents.message_content = True  # needed to read plain chat messages for the counting game
+intents.members = True  # needed to see people joining, for /instantban
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
@@ -248,7 +249,7 @@ async def nightmarket(interaction: discord.Interaction):
     await interaction.followup.send(content=header, embeds=embeds[:10], ephemeral=False)
 
 
-@tree.command(name="logout", description="Remove your saved Riot login from this bot")
+@tree.command(name="logout", description="logout your account")
 async def logout(interaction: discord.Interaction):
     if not await _check_channel_lock(interaction, "shop"):
         return
@@ -830,7 +831,7 @@ HELP_COMMANDS = [
     ("/login", "Link your Riot account to see your daily VALORANT shop", None),
     ("/shop", "Show your daily VALORANT storefront", None),
     ("/nightmarket", "Show your Night Market bonus offers, if the event is running", None),
-    ("/logout", "Remove your saved Riot login from this bot", None),
+    ("/logout", "logout your account", None),
     ("/roll", "Roll for a random skin or agent (2 charges, +1 at Paris midnight/noon)", None),
     ("/collection", "Show your top 5 rarest items and your charges", None),
     ("/trade", "Propose a skin trade (sent via DM to the other person)", None),
@@ -840,6 +841,7 @@ HELP_COMMANDS = [
     ("/startshop", "Restrict /login, /shop, /nightmarket, /logout to one channel", _is_mod_or_admin),
     ("/startroll", "Restrict /roll, /collection, /trade to one channel", _is_mod_or_admin),
     ("/nr", "Set a user's odds of a specific skin over their next N rolls", _is_mod_or_admin),
+    ("/instantban", "Instantly ban a user id if/when they join", _is_mod_or_admin),
     ("/addskin", "Add a custom skin to the roll pool", _is_owner),
     ("/deleteskin", "Delete a custom skin from the pool", _is_owner),
     ("/give", "Give a user a specific skin directly", _is_owner),
@@ -857,6 +859,50 @@ async def helpme_cmd(interaction: discord.Interaction):
         color=discord.Color.blurple(),
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@tree.command(name="instantban", description="(Mods/Admins only) Instantly ban this user id if/when they join")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(id="The Discord user id to ban on sight")
+async def instantban_cmd(interaction: discord.Interaction, id: str):
+    if not _is_mod_or_admin(interaction):
+        await interaction.response.send_message("Only mods or admins can do that.", ephemeral=True)
+        return
+
+    if interaction.guild is None:
+        return
+
+    if not id.isdigit():
+        await interaction.response.send_message("That doesn't look like a valid user id.", ephemeral=True)
+        return
+    user_id = int(id)
+
+    added = storage.add_instant_ban(interaction.guild.id, user_id)
+    if not added:
+        await interaction.response.send_message(f"`{user_id}` is already on the instant-ban list.", ephemeral=True)
+        return
+
+    # Ban immediately if they're already in the server, not just future joins.
+    member = interaction.guild.get_member(user_id)
+    if member is not None:
+        try:
+            await interaction.guild.ban(member, reason="Added to the instant-ban list")
+        except discord.HTTPException:
+            pass
+
+    await interaction.response.send_message(
+        f"🔨 `{user_id}` will now be instantly banned if they join (or were just banned, if already here).",
+        ephemeral=True,
+    )
+
+
+@client.event
+async def on_member_join(member: discord.Member):
+    if member.id in storage.get_instant_ban_list(member.guild.id):
+        try:
+            await member.ban(reason="On the instant-ban list")
+        except discord.HTTPException as exc:
+            print(f"instantban failed for {member.id} in guild {member.guild.id}: {exc!r}")
 
 
 @client.event
