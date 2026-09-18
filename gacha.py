@@ -19,23 +19,13 @@ CUSTOM_SKINS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cu
 RARITY_TIERS = ["Select", "Deluxe", "Premium", "Exclusive", "Ultra"]
 
 # Agents are a separate category from skin rarities (not selectable for custom
-# skins), but they're folded into the same weighted roll. At a 95% drop chance
-# they're by far the most common outcome, so they rank below every skin tier
-# (least rare) rather than between Exclusive and Ultra.
+# skins), but they're folded into the same weighted roll and slot into the
+# rarity ranking between Exclusive and Ultra to reflect their drop odds.
 AGENT_CATEGORY = "Agent"
-_DISPLAY_RARITY_ORDER = [AGENT_CATEGORY, "Select", "Deluxe", "Premium", "Exclusive", "Ultra"]
+_DISPLAY_RARITY_ORDER = ["Select", "Deluxe", "Premium", "Exclusive", AGENT_CATEGORY, "Ultra"]
 RARITY_RANK = {name: i for i, name in enumerate(_DISPLAY_RARITY_ORDER)}
-# Weights double as exact percentages (they sum to 100): Agent takes 95%, and
-# skins split the remaining 5% in the same relative proportions they used to
-# split 100% (45:30:15:7:3).
-RARITY_WEIGHTS = {
-    AGENT_CATEGORY: 95,
-    "Select": 2.25,
-    "Deluxe": 1.5,
-    "Premium": 0.75,
-    "Exclusive": 0.35,
-    "Ultra": 0.15,
-}
+# Weights double as exact percentages (they sum to 100).
+RARITY_WEIGHTS = {"Select": 36, "Deluxe": 25, "Premium": 17, "Exclusive": 7, AGENT_CATEGORY: 7, "Ultra": 8}
 
 _pool_cache: dict = {"value": None, "fetched_at": 0.0, "tier_icons": {}}
 _POOL_TTL_SECONDS = 24 * 3600
