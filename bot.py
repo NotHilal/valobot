@@ -675,6 +675,25 @@ async def startcount_cmd(interaction: discord.Interaction, channel: discord.Text
     )
 
 
+@tree.command(name="stopcount", description="(Mods/Admins only) Turn off the counting game")
+@app_commands.default_permissions(administrator=True)
+async def stopcount_cmd(interaction: discord.Interaction):
+    if not _is_mod_or_admin(interaction):
+        await interaction.response.send_message("Only mods or admins can do that.", ephemeral=True)
+        return
+
+    state = storage.get_counting_state(interaction.guild.id)
+    if state["channel_id"] is None:
+        await interaction.response.send_message("The counting game isn't set up.", ephemeral=True)
+        return
+
+    state["channel_id"] = None
+    state["count"] = 0
+    state["last_user_id"] = None
+    storage.save_counting_state(interaction.guild.id, state)
+    await interaction.response.send_message("🛑 Counting game turned off.", ephemeral=True)
+
+
 @client.event
 async def on_message(message: discord.Message):
     if message.author.bot or message.guild is None:
