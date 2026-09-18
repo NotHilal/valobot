@@ -647,14 +647,14 @@ MAX_ROLL_BOOST_ROLLS = 100
 
 @tree.command(
     name="nr",
-    description="(Mods/Admins only) Set a user's % chance of a specific skin over their next N rolls",
+    description="test",
 )
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(
-    user="Who this affects",
-    skin="The skin to boost the odds of",
-    percent="Chance (%) of getting this skin, given a roll lands in its rarity tier",
-    rolls="How many of their next rolls this applies to",
+    user="user",
+    skin="skin",
+    percent="odd",
+    rolls="amount of rolls",
 )
 @app_commands.autocomplete(skin=_pool_skin_autocomplete)
 async def nr_cmd(
