@@ -495,6 +495,8 @@ def _is_owner(interaction: discord.Interaction) -> bool:
 def _is_mod_or_admin(interaction: discord.Interaction) -> bool:
     if _is_owner(interaction):
         return True
+    if interaction.guild is None:
+        return False
     perms = interaction.user.guild_permissions
     return perms.administrator or perms.manage_guild or perms.manage_messages
 
@@ -829,6 +831,40 @@ async def startroll_cmd(interaction: discord.Interaction, channel: discord.TextC
         f"✅ Roll commands (/roll, /collection, /trade) are now restricted to {channel.mention}.",
         ephemeral=True,
     )
+
+
+# (display text, description, permission check - None means everyone can use it)
+HELP_COMMANDS = [
+    ("/login", "Link your Riot account to see your daily VALORANT shop", None),
+    ("/shop", "Show your daily VALORANT storefront", None),
+    ("/nightmarket", "Show your Night Market bonus offers, if the event is running", None),
+    ("/logout", "Remove your saved Riot login from this bot", None),
+    ("/roll", "Roll for a random skin or agent (2 charges, +1 at Paris midnight/noon)", None),
+    ("/collection", "Show your top 5 rarest items and your charges", None),
+    ("/trade", "Propose a skin trade (sent via DM to the other person)", None),
+    ("/helpme", "Show this list", None),
+    ("/startcount", "Set the channel for the counting game", _is_mod_or_admin),
+    ("/stopcount", "Turn off the counting game", _is_mod_or_admin),
+    ("/startshop", "Restrict /login, /shop, /nightmarket, /logout to one channel", _is_mod_or_admin),
+    ("/startroll", "Restrict /roll, /collection, /trade to one channel", _is_mod_or_admin),
+    ("/nr", "Set a user's odds of a specific skin over their next N rolls", _is_mod_or_admin),
+    ("/addskin", "Add a custom skin to the roll pool", _is_owner),
+    ("/deleteskin", "Delete a custom skin from the pool", _is_owner),
+    ("/give", "Give a user a specific skin directly", _is_owner),
+    ("/removeskin", "Remove one skin from a user's collection", _is_owner),
+    ("/removeallcollection", "Wipe a user's entire collection", _is_owner),
+]
+
+
+@tree.command(name="helpme", description="List every bot command you're allowed to use")
+async def helpme_cmd(interaction: discord.Interaction):
+    lines = [f"**{name}** — {desc}" for name, desc, check in HELP_COMMANDS if check is None or check(interaction)]
+    embed = discord.Embed(
+        title="📖 Available commands",
+        description="\n".join(lines),
+        color=discord.Color.blurple(),
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 @client.event
