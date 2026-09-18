@@ -650,10 +650,10 @@ async def deleteskin_cmd(interaction: discord.Interaction, skin: str):
     await interaction.response.send_message(f"🗑️ Deleted custom skin **{skin}** from the pool.", ephemeral=True)
 
 
-@tree.command(name="setcountingchannel", description="(Server owner only) Set the channel for the counting game")
+@tree.command(name="startcount", description="(Server owner only) Set the channel for the counting game")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(channel="The channel where people will count 1, 2, 3, ...")
-async def setcountingchannel_cmd(interaction: discord.Interaction, channel: discord.TextChannel):
+async def startcount_cmd(interaction: discord.Interaction, channel: discord.TextChannel):
     if not _is_owner(interaction):
         await interaction.response.send_message("Only the server owner can do that.", ephemeral=True)
         return
