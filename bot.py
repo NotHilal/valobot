@@ -444,6 +444,13 @@ def _is_owner(interaction: discord.Interaction) -> bool:
     return interaction.guild is not None and interaction.user.id == interaction.guild.owner_id
 
 
+def _is_mod_or_admin(interaction: discord.Interaction) -> bool:
+    if _is_owner(interaction):
+        return True
+    perms = interaction.user.guild_permissions
+    return perms.administrator or perms.manage_guild or perms.manage_messages
+
+
 @tree.command(name="trade", description="Offer to trade one of your skins for one of a friend's")
 @app_commands.describe(
     user="Who to trade with", offer="Your skin to give", request="Their skin you want in return"
@@ -650,12 +657,12 @@ async def deleteskin_cmd(interaction: discord.Interaction, skin: str):
     await interaction.response.send_message(f"🗑️ Deleted custom skin **{skin}** from the pool.", ephemeral=True)
 
 
-@tree.command(name="startcount", description="(Server owner only) Set the channel for the counting game")
+@tree.command(name="startcount", description="(Mods/Admins only) Set the channel for the counting game")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(channel="The channel where people will count 1, 2, 3, ...")
 async def startcount_cmd(interaction: discord.Interaction, channel: discord.TextChannel):
-    if not _is_owner(interaction):
-        await interaction.response.send_message("Only the server owner can do that.", ephemeral=True)
+    if not _is_mod_or_admin(interaction):
+        await interaction.response.send_message("Only mods or admins can do that.", ephemeral=True)
         return
 
     state = storage.get_counting_state(interaction.guild.id)
