@@ -698,7 +698,9 @@ async def on_message(message: discord.Message):
         await message.add_reaction("💀")
     except discord.HTTPException:
         pass
-    await message.channel.send(counting.random_roast(message.author.mention, reached))
+    await message.channel.send(
+        counting.random_roast(message.author.mention, reached, is_double_post=is_repeat_poster)
+    )
 
 
 @client.event

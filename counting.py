@@ -2,19 +2,28 @@
 
 import random
 
+# Used for any mistake (wrong number or double-post).
 ROAST_MESSAGES = [
-    "{mention} counted like they were still using their toes. Back to 1.",
+    "{mention} counted like they were still using their fingers.",
     "{mention} just single-handedly reset {count} people's progress.",
-    "{mention} really thought that was the next number. It was not.",
-    "RIP the count. {mention} killed it at {count}.",
-    "{mention} forgot how numbers work. The streak of {count} is no more.",
-    "{mention} went twice in a row like nobody would notice.",
-    "{mention} broke it. {count} numbers, gone, because of one person.",
-    "Legendary blunder by {mention}. {count} → 0 in one message.",
     "{mention} really said \"trust me\" and then wasn't even close.",
-    "Everyone thank {mention} for ruining a perfectly good streak of {count}.",
+    "Everyone thank {mention} for ruining our streak 🙄",
+    "Who invited bro {mention}??",
+    "Send {mention} to the wall of shame nowww",
+    "Mods ban {mention}",
+    "You think you're funny {mention}?",
+    "Party pooper {mention}",
+    "ofc it had to be {mention}",
+    "{mention} Get outttttt",
+    "wtf are u saying {mention}",
+]
+
+# Only used when the mistake was the same person posting twice in a row.
+DOUBLE_POST_ROAST_MESSAGES = [
+    "{mention} went twice in a row like nobody would notice.",
 ]
 
 
-def random_roast(mention: str, count: int) -> str:
-    return random.choice(ROAST_MESSAGES).format(mention=mention, count=count)
+def random_roast(mention: str, count: int, is_double_post: bool = False) -> str:
+    pool = ROAST_MESSAGES + DOUBLE_POST_ROAST_MESSAGES if is_double_post else ROAST_MESSAGES
+    return random.choice(pool).format(mention=mention, count=count)
