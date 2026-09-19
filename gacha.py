@@ -30,6 +30,16 @@ RARITY_RANK = {name: i for i, name in enumerate(_DISPLAY_RARITY_ORDER)}
 # Weights double as exact percentages (they sum to 100).
 RARITY_WEIGHTS = {"Select": 36, "Deluxe": 25, "Premium": 17, "Exclusive": 8, AGENT_CATEGORY: 6, "Ultra": 8}
 
+# Embed accent color per rarity (hex, 0xRRGGBB) - kept mid-toned, not neon or dark.
+RARITY_COLORS = {
+    "Select": 0x22D3EE,  # cyan
+    "Deluxe": 0x2DD4BF,  # green-blue (teal)
+    "Premium": 0xE0529C,  # pink
+    "Exclusive": 0xCD7F32,  # bronze
+    AGENT_CATEGORY: 0xE63946,  # red
+    "Ultra": 0xE8B34A,  # gold
+}
+
 _pool_cache: dict = {"value": None, "fetched_at": 0.0, "tier_icons": {}}
 _POOL_TTL_SECONDS = 24 * 3600
 

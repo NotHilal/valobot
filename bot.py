@@ -340,7 +340,7 @@ async def roll_cmd(interaction: discord.Interaction):
     embed = discord.Embed(
         title=f"🎉 {interaction.user.display_name} rolled: {item['name']}",
         description=f"{rolls_left} charge{'s' if rolls_left != 1 else ''} left.",
-        color=discord.Color.gold(),
+        color=gacha.RARITY_COLORS.get(item["rarity"], discord.Color.gold()),
     )
     embed.set_author(name=item["rarity"], icon_url=item.get("tier_icon"))
     embed.set_image(url=item["icon"])
@@ -369,9 +369,8 @@ class CollectionView(discord.ui.View):
         page_items = self.items[start : start + self.PAGE_SIZE]
         embeds = []
         for item in page_items:
-            embed = discord.Embed(
-                title=item["name"], description=f"Rarity: **{item['rarity']}**", color=discord.Color.purple()
-            )
+            color = gacha.RARITY_COLORS.get(item["rarity"], discord.Color.purple())
+            embed = discord.Embed(title=item["name"], description=f"Rarity: **{item['rarity']}**", color=color)
             embed.set_image(url=item["icon"])
             embeds.append(embed)
         content = f"{self.header}\nPage {self.page + 1}/{self.max_page + 1}"
