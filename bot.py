@@ -672,7 +672,7 @@ async def setnextroll_cmd(interaction: discord.Interaction, user: discord.Member
         await interaction.response.send_message("Only mods or admins can do that.", ephemeral=True)
         return
 
-    await interaction.response.defer(ephemeral=True, thinking=True)
+    await interaction.response.defer(thinking=True)
     async with aiohttp.ClientSession() as http:
         pool = await gacha.get_pool(http)
     item = gacha.find_in_pool(pool, skin)
@@ -686,8 +686,7 @@ async def setnextroll_cmd(interaction: discord.Interaction, user: discord.Member
         storage.save_collection(user.id, collection)
 
     await interaction.followup.send(
-        f"🎯 {user.display_name}'s next `/rollskin` is guaranteed to be **{item['name']}** ({item['rarity']}).",
-        ephemeral=True,
+        f"🎯 {user.display_name}'s next `/rollskin` is guaranteed to be **{item['name']}** ({item['rarity']})."
     )
 
 
@@ -712,8 +711,7 @@ async def giverolls_cmd(
 
     await interaction.response.send_message(
         f"🔋 Gave {user.display_name} **+{amount}** roll charge{'s' if amount != 1 else ''} "
-        f"(now has **{new_total}**).",
-        ephemeral=True,
+        f"(now has **{new_total}**)."
     )
 
 
