@@ -1046,6 +1046,7 @@ HELP_COMMANDS = [
     ("/instantban", "Instantly ban a user id if/when they join", _is_mod_or_admin),
     ("/banword", "Time out anyone who types a specific word", _is_mod_or_admin),
     ("/unbanword", "Remove a word from the banned-word list", _is_mod_or_admin),
+    ("/banwords", "List all banned words", _is_mod_or_admin),
     ("/give", "Give a user a specific skin directly", _is_mod_or_admin),
     ("/removeskin", "Remove one skin from a user's collection", _is_mod_or_admin),
     ("/removeallcollection", "Wipe a user's entire collection", _is_mod_or_admin),
@@ -1159,6 +1160,27 @@ async def unbanword_cmd(interaction: discord.Interaction, word: str):
         await interaction.response.send_message(f"\"{word}\" isn't on the banned-word list.", ephemeral=True)
         return
     await interaction.response.send_message(f"✅ \"{word}\" is no longer banned.")
+
+
+@tree.command(name="banwords", description="(Mods/Admins only) List all banned words")
+@app_commands.default_permissions(administrator=True)
+async def banwords_cmd(interaction: discord.Interaction):
+    if not _is_mod_or_admin(interaction):
+        await interaction.response.send_message("Only mods or admins can do that.", ephemeral=True)
+        return
+    if interaction.guild is None:
+        return
+
+    banned = storage.get_banned_words(interaction.guild.id)
+    if not banned:
+        await interaction.response.send_message("No words are currently banned.", ephemeral=True)
+        return
+
+    lines = [
+        f"**{word}** — {minutes} minute{'s' if minutes != 1 else ''}"
+        for word, minutes in sorted(banned.items())
+    ]
+    await interaction.response.send_message("🚫 **Banned words:**\n" + "\n".join(lines), ephemeral=True)
 
 
 async def _check_banned_words(message: discord.Message) -> bool:
