@@ -208,10 +208,17 @@ def roll(pool: dict[str, list[dict]], boost: dict | None = None) -> dict:
     return stamp(chosen)
 
 
-def top_items(items: list[dict], n: int = 5) -> list[dict]:
-    return sorted(items, key=lambda it: (RARITY_RANK.get(it["rarity"], -1), it.get("obtained_at", "")), reverse=True)[
-        :n
-    ]
+def sort_items_by_rarity(items: list[dict]) -> list[dict]:
+    """Rarest (and, within a rarity, most recently obtained) first."""
+    return sorted(items, key=lambda it: (RARITY_RANK.get(it["rarity"], -1), it.get("obtained_at", "")), reverse=True)
+
+
+def rarity_counts(items: list[dict]) -> list[tuple[str, int]]:
+    """(rarity, count) pairs for every rarity present, rarest first."""
+    counts: dict[str, int] = {}
+    for item in items:
+        counts[item["rarity"]] = counts.get(item["rarity"], 0) + 1
+    return sorted(counts.items(), key=lambda pair: RARITY_RANK.get(pair[0], -1), reverse=True)
 
 
 def find_in_pool(pool: dict[str, list[dict]], name: str) -> dict | None:

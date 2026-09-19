@@ -347,7 +347,64 @@ async def roll_cmd(interaction: discord.Interaction):
     await interaction.followup.send(embed=embed)
 
 
-@tree.command(name="collection", description="Show your top 5 rarest Valorant skins")
+class CollectionView(discord.ui.View):
+    PAGE_SIZE = 5
+
+    def __init__(self, owner_id: int, items: list[dict], header: str):
+        super().__init__(timeout=180)
+        self.owner_id = owner_id
+        self.items = items
+        self.header = header
+        self.page = 0
+        self.max_page = max(0, (len(items) - 1) // self.PAGE_SIZE)
+        self.message: discord.Message | None = None
+        self._update_buttons()
+
+    def _update_buttons(self):
+        self.prev_button.disabled = self.page <= 0
+        self.next_button.disabled = self.page >= self.max_page
+
+    def render(self) -> tuple[str, list[discord.Embed]]:
+        start = self.page * self.PAGE_SIZE
+        page_items = self.items[start : start + self.PAGE_SIZE]
+        embeds = []
+        for item in page_items:
+            embed = discord.Embed(
+                title=item["name"], description=f"Rarity: **{item['rarity']}**", color=discord.Color.purple()
+            )
+            embed.set_image(url=item["icon"])
+            embeds.append(embed)
+        content = f"{self.header}\nPage {self.page + 1}/{self.max_page + 1}"
+        return content, embeds
+
+    async def _turn_page(self, interaction: discord.Interaction, delta: int):
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("This isn't your collection.", ephemeral=True)
+            return
+        self.page = max(0, min(self.max_page, self.page + delta))
+        self._update_buttons()
+        content, embeds = self.render()
+        await interaction.response.edit_message(content=content, embeds=embeds, view=self)
+
+    @discord.ui.button(label="◀ Previous", style=discord.ButtonStyle.secondary)
+    async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._turn_page(interaction, -1)
+
+    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary)
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._turn_page(interaction, 1)
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+
+@tree.command(name="collection", description="Browse your Valorant skin collection")
 async def collection_cmd(interaction: discord.Interaction):
     if not await _check_channel_lock(interaction, "roll"):
         return
@@ -368,20 +425,22 @@ async def collection_cmd(interaction: discord.Interaction):
         )
         return
 
-    top = gacha.top_items(items, 5)
-    embeds = []
-    for item in top:
-        embed = discord.Embed(
-            title=item["name"], description=f"Rarity: **{item['rarity']}**", color=discord.Color.purple()
-        )
-        embed.set_image(url=item["icon"])
-        embeds.append(embed)
-
+    counts_line = " · ".join(f"{count} {rarity}" for rarity, count in gacha.rarity_counts(items))
     header = (
-        f"🏆 **{interaction.user.display_name}'s Top {len(top)} Skins** — {len(items)} total in collection\n"
+        f"🏆 **{interaction.user.display_name}'s Collection** — {len(items)} total\n"
+        f"{counts_line}\n"
         f"{charges_line}"
     )
-    await interaction.response.send_message(content=header, embeds=embeds)
+
+    sorted_items = gacha.sort_items_by_rarity(items)
+    view = CollectionView(owner_id=interaction.user.id, items=sorted_items, header=header)
+    content, embeds = view.render()
+    if view.max_page == 0:
+        view.stop()
+        await interaction.response.send_message(content=content, embeds=embeds)
+    else:
+        await interaction.response.send_message(content=content, embeds=embeds, view=view)
+        view.message = await interaction.original_response()
 
 
 # Maps a user id to the TradeView they're currently tied up in (as proposer or
@@ -903,7 +962,7 @@ HELP_COMMANDS = [
     ("/nightmarket", "Show your Night Market bonus offers, if the event is running", None),
     ("/logout", "logout your account", None),
     ("/rollskin", "Roll for a random skin or agent (2 charges, +1 at Paris midnight/noon)", None),
-    ("/collection", "Show your top 5 rarest items and your charges", None),
+    ("/collection", "Browse your full skin collection and charges", None),
     ("/trade", "Propose a skin trade (sent via DM to the other person)", None),
     ("/helpme", "Show this list", None),
     ("/startcount", "Set the channel for the counting game", _is_mod_or_admin),
