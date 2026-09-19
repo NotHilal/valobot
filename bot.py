@@ -371,7 +371,7 @@ class CollectionView(discord.ui.View):
         for item in page_items:
             color = gacha.RARITY_COLORS.get(item["rarity"], discord.Color.purple())
             embed = discord.Embed(title=item["name"], description=f"Rarity: **{item['rarity']}**", color=color)
-            embed.set_image(url=item["icon"])
+            embed.set_thumbnail(url=item["icon"])
             embeds.append(embed)
         content = f"{self.header}\nPage {self.page + 1}/{self.max_page + 1}"
         return content, embeds
@@ -436,9 +436,9 @@ async def collection_cmd(interaction: discord.Interaction):
     content, embeds = view.render()
     if view.max_page == 0:
         view.stop()
-        await interaction.response.send_message(content=content, embeds=embeds)
+        await interaction.response.send_message(content=content, embeds=embeds, ephemeral=True)
     else:
-        await interaction.response.send_message(content=content, embeds=embeds, view=view)
+        await interaction.response.send_message(content=content, embeds=embeds, view=view, ephemeral=True)
         view.message = await interaction.original_response()
 
 
@@ -559,6 +559,55 @@ async def _member_collection_autocomplete(interaction: discord.Interaction, curr
     names = sorted({item["name"] for item in collection.get("items", [])})
     matches = [n for n in names if current.lower() in n.lower()][:25]
     return [app_commands.Choice(name=n, value=n) for n in matches]
+
+
+@tree.command(name="showoff", description="Publicly show off 1-3 skins from your collection")
+@app_commands.describe(
+    skin1="A skin from your collection",
+    skin2="(optional) another skin",
+    skin3="(optional) another skin",
+)
+@app_commands.autocomplete(skin1=_offer_autocomplete, skin2=_offer_autocomplete, skin3=_offer_autocomplete)
+async def showoff_cmd(
+    interaction: discord.Interaction,
+    skin1: str,
+    skin2: str | None = None,
+    skin3: str | None = None,
+):
+    if not await _check_channel_lock(interaction, "roll"):
+        return
+    if interaction.guild is None:
+        return
+
+    collection = storage.get_collection(interaction.guild.id, interaction.user.id)
+
+    seen: set[str] = set()
+    names: list[str] = []
+    for name in (skin1, skin2, skin3):
+        if name and name.lower() not in seen:
+            seen.add(name.lower())
+            names.append(name)
+
+    items = []
+    for name in names:
+        item = gacha.find_item(collection, name)
+        if not item:
+            await interaction.response.send_message(
+                f"You don't have a skin named \"{name}\". Check `/collection`.", ephemeral=True
+            )
+            return
+        items.append(item)
+
+    embeds = []
+    for item in items:
+        color = gacha.RARITY_COLORS.get(item["rarity"], discord.Color.purple())
+        embed = discord.Embed(title=item["name"], description=f"Rarity: **{item['rarity']}**", color=color)
+        embed.set_image(url=item["icon"])
+        embeds.append(embed)
+
+    await interaction.response.send_message(
+        content=f"✨ **{interaction.user.display_name}** is showing off their collection!", embeds=embeds
+    )
 
 
 def _is_owner(interaction: discord.Interaction) -> bool:
@@ -962,6 +1011,7 @@ HELP_COMMANDS = [
     ("/logout", "logout your account", None),
     ("/rollskin", "Roll for a random skin or agent (2 charges, +1 at Paris midnight/noon)", None),
     ("/collection", "Browse your full skin collection and charges", None),
+    ("/showoff", "Publicly show off 1-3 skins from your collection", None),
     ("/trade", "Propose a skin trade (sent via DM to the other person)", None),
     ("/helpme", "Show this list", None),
     ("/startcount", "Set the channel for the counting game", _is_mod_or_admin),
