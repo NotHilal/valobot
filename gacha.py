@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import random
@@ -31,21 +32,6 @@ RARITY_WEIGHTS = {"Select": 36, "Deluxe": 25, "Premium": 17, "Exclusive": 8, AGE
 
 _pool_cache: dict = {"value": None, "fetched_at": 0.0, "tier_icons": {}}
 _POOL_TTL_SECONDS = 24 * 3600
-
-# Discord's embed image renderer can fail (or take too long) on very large
-# external images, showing no image at all. A handful of skins on
-# valorant-api.com have multi-megabyte icons, so anything over this size is
-# dropped from the roll pool.
-MAX_ICON_BYTES = 1_500_000
-
-
-async def _icon_is_too_large(http: aiohttp.ClientSession, url: str) -> bool:
-    try:
-        async with http.head(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-            content_length = resp.headers.get("Content-Length")
-            return bool(content_length) and int(content_length) > MAX_ICON_BYTES
-    except aiohttp.ClientError:
-        return False  # can't tell - don't exclude a skin over a transient network hiccup
 
 
 def load_icon_overrides() -> dict[str, str]:
@@ -113,20 +99,34 @@ async def _fetch_official_pool(http: aiohttp.ClientSession) -> tuple[dict[str, l
     overrides = load_icon_overrides()
     all_items = [item for items in pool.values() for item in items]
     sem = asyncio.Semaphore(30)
-    too_large_ids: set[str] = set()
+    # Riot/valorant-api.com serves the exact same placeholder image for
+    # several unrelated skins that don't have real art yet (confirmed: 4
+    # different skins byte-for-byte identical). Any icon whose content hash
+    # is shared by more than one item is almost certainly one of these
+    # placeholders, not real art, so hash everything and drop the dupes.
+    hash_to_ids: dict[str, list[str]] = {}
 
     async def _check(item: dict) -> None:
         override_url = overrides.get(item["name"])
         if override_url:
             item["icon"] = override_url
-            return  # manually-provided replacement - trust it, skip the size check
+            return  # manually-provided replacement - trust it, skip the hash check
         async with sem:
-            if await _icon_is_too_large(http, item["icon"]):
-                too_large_ids.add(item["id"])
+            try:
+                async with http.get(item["icon"], timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    data = await resp.read()
+            except aiohttp.ClientError:
+                return  # can't tell - don't exclude a skin over a transient network hiccup
+        digest = hashlib.sha256(data).hexdigest()
+        hash_to_ids.setdefault(digest, []).append(item["id"])
 
     await asyncio.gather(*(_check(item) for item in all_items))
-    if too_large_ids:
-        pool = {rarity: [item for item in items if item["id"] not in too_large_ids] for rarity, items in pool.items()}
+
+    placeholder_ids = {item_id for ids in hash_to_ids.values() if len(ids) > 1 for item_id in ids}
+    if placeholder_ids:
+        pool = {
+            rarity: [item for item in items if item["id"] not in placeholder_ids] for rarity, items in pool.items()
+        }
 
     return pool, tier_icons
 

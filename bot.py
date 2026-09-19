@@ -2,7 +2,6 @@
 plus /rollskin, /collection, /trade for a daily skin-collecting side game,
 plus a counting game in a designated channel."""
 
-import io
 import os
 
 import aiohttp
@@ -38,29 +37,6 @@ async def _check_channel_lock(interaction: discord.Interaction, group: str) -> b
     where = channel.mention if channel else "the designated channel"
     await interaction.response.send_message(f"This command can only be used in {where}.", ephemeral=True)
     return False
-
-
-async def _send_with_item_image(send, embed: discord.Embed, icon_url: str, **kwargs) -> None:
-    """Sends `embed` with `icon_url` attached as a plain Discord file, instead
-    of a hotlinked external URL or an `attachment://` embed reference.
-    Discord's own embed-image proxy can intermittently fail to fetch from
-    some external CDNs (valorant-api.com's included) even when the URL
-    itself is perfectly valid, showing a broken image; a real, plain
-    attachment is the most basic way Discord can show a picture, with no
-    embed-linking step that could itself go wrong. Falls back to a plain
-    hotlink if the download itself fails.
-    """
-    try:
-        async with aiohttp.ClientSession() as http:
-            async with http.get(icon_url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                resp.raise_for_status()
-                image_bytes = await resp.read()
-        print(f"re-hosted image OK ({len(image_bytes)} bytes): {icon_url}")
-        await send(embed=embed, file=discord.File(io.BytesIO(image_bytes), filename="image.png"), **kwargs)
-    except Exception as exc:
-        print(f"couldn't re-host image {icon_url}: {exc!r}")
-        embed.set_image(url=icon_url)
-        await send(embed=embed, **kwargs)
 
 
 class LoginLinkModal(discord.ui.Modal, title="Paste your login link"):
@@ -364,7 +340,8 @@ async def roll_cmd(interaction: discord.Interaction):
         color=discord.Color.gold(),
     )
     embed.set_author(name=item["rarity"], icon_url=item.get("tier_icon"))
-    await _send_with_item_image(interaction.followup.send, embed, item["icon"])
+    embed.set_image(url=item["icon"])
+    await interaction.followup.send(embed=embed)
 
 
 @tree.command(name="collection", description="Show your top 5 rarest Valorant skins")
