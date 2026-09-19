@@ -55,6 +55,7 @@ async def _send_with_item_image(send, embed: discord.Embed, icon_url: str, **kwa
                 image_bytes = await resp.read()
         filename = "image.png"
         embed.set_image(url=f"attachment://{filename}")
+        print(f"re-hosted image OK ({len(image_bytes)} bytes): {icon_url}")
         await send(embed=embed, file=discord.File(io.BytesIO(image_bytes), filename=filename), **kwargs)
     except Exception as exc:
         print(f"couldn't re-host image {icon_url}: {exc!r}")
