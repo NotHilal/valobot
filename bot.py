@@ -760,7 +760,7 @@ async def startcount_cmd(interaction: discord.Interaction, channel: discord.Text
     state["last_user_id"] = None
     storage.save_counting_state(interaction.guild.id, state)
     await interaction.response.send_message(
-        f"✅ Counting game set up in {channel.mention}. Someone start with **1**!", ephemeral=True
+        f"✅ Counting game set up in {channel.mention}. Someone start with **1**!"
     )
 
 
@@ -779,7 +779,7 @@ async def stopcount_cmd(interaction: discord.Interaction):
     state["count"] = 0
     state["last_user_id"] = None
     storage.save_counting_state(interaction.guild.id, state)
-    await interaction.response.send_message("🛑 Counting game turned off.", ephemeral=True)
+    await interaction.response.send_message("🛑 Counting game turned off.")
 
 
 @tree.command(
@@ -794,8 +794,7 @@ async def startshop_cmd(interaction: discord.Interaction, channel: discord.TextC
 
     storage.set_channel_lock(interaction.guild.id, "shop", channel.id)
     await interaction.response.send_message(
-        f"✅ Shop commands (/login, /shop, /nightmarket, /logout) are now restricted to {channel.mention}.",
-        ephemeral=True,
+        f"✅ Shop commands (/login, /shop, /nightmarket, /logout) are now restricted to {channel.mention}."
     )
 
 
@@ -811,8 +810,7 @@ async def startroll_cmd(interaction: discord.Interaction, channel: discord.TextC
 
     storage.set_channel_lock(interaction.guild.id, "roll", channel.id)
     await interaction.response.send_message(
-        f"✅ Roll commands (/roll, /collection, /trade) are now restricted to {channel.mention}.",
-        ephemeral=True,
+        f"✅ Roll commands (/roll, /collection, /trade) are now restricted to {channel.mention}."
     )
 
 
@@ -831,7 +829,7 @@ async def stopshop_cmd(interaction: discord.Interaction):
 
     storage.set_channel_lock(interaction.guild.id, "shop", None)
     await interaction.response.send_message(
-        "✅ Shop commands (/login, /shop, /nightmarket, /logout) can be used anywhere again.", ephemeral=True
+        "✅ Shop commands (/login, /shop, /nightmarket, /logout) can be used anywhere again."
     )
 
 
@@ -850,7 +848,7 @@ async def stoproll_cmd(interaction: discord.Interaction):
 
     storage.set_channel_lock(interaction.guild.id, "roll", None)
     await interaction.response.send_message(
-        "✅ Roll commands (/roll, /collection, /trade) can be used anywhere again.", ephemeral=True
+        "✅ Roll commands (/roll, /collection, /trade) can be used anywhere again."
     )
 
 
