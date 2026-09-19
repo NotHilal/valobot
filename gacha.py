@@ -37,7 +37,7 @@ RARITY_COLORS = {
     "Premium": 0xE0529C,  # pink
     "Exclusive": 0xF59858,  # orange
     AGENT_CATEGORY: 0xE63946,  # red
-    "Ultra": 0xF59858,  # orange
+    "Ultra": 0xEEDA6C,  # soft gold
 }
 
 _pool_cache: dict = {"value": None, "fetched_at": 0.0, "tier_icons": {}}
