@@ -53,24 +53,31 @@ def delete_user(discord_id: int) -> bool:
     return False
 
 
-def get_collection(discord_id: int) -> dict:
-    return _load(COLLECTIONS_FILE).get(str(discord_id)) or {
+def _collection_key(guild_id: int, discord_id: int) -> str:
+    # Collections are scoped per-server: the same person has an independent
+    # collection in each server the bot is in, not one shared globally.
+    return f"{guild_id}:{discord_id}"
+
+
+def get_collection(guild_id: int, discord_id: int) -> dict:
+    return _load(COLLECTIONS_FILE).get(_collection_key(guild_id, discord_id)) or {
         "items": [],
         "charges": 0,
         "last_charge_period_index": None,
     }
 
 
-def save_collection(discord_id: int, collection: dict) -> None:
+def save_collection(guild_id: int, discord_id: int, collection: dict) -> None:
     data = _load(COLLECTIONS_FILE)
-    data[str(discord_id)] = collection
+    data[_collection_key(guild_id, discord_id)] = collection
     _save(COLLECTIONS_FILE, data)
 
 
-def delete_collection(discord_id: int) -> bool:
+def delete_collection(guild_id: int, discord_id: int) -> bool:
     data = _load(COLLECTIONS_FILE)
-    if str(discord_id) in data:
-        del data[str(discord_id)]
+    key = _collection_key(guild_id, discord_id)
+    if key in data:
+        del data[key]
         _save(COLLECTIONS_FILE, data)
         return True
     return False

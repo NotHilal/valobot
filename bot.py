@@ -269,14 +269,17 @@ async def logout(interaction: discord.Interaction):
 async def roll_cmd(interaction: discord.Interaction):
     if not await _check_channel_lock(interaction, "roll"):
         return
+    if interaction.guild is None:
+        return
+    guild_id = interaction.guild.id
 
     forced_item = None
     roll_boost = None
     boost_before_use = None
     async with storage.collection_lock:
-        collection = storage.get_collection(interaction.user.id)
+        collection = storage.get_collection(guild_id, interaction.user.id)
         gacha.sync_roll_charges(collection)
-        storage.save_collection(interaction.user.id, collection)
+        storage.save_collection(guild_id, interaction.user.id, collection)
 
         if collection["charges"] <= 0:
             remaining = gacha.seconds_until_next_roll_period()
@@ -304,7 +307,7 @@ async def roll_cmd(interaction: discord.Interaction):
                     collection.pop("roll_boost", None)
                 else:
                     collection["roll_boost"] = active_boost
-        storage.save_collection(interaction.user.id, collection)
+        storage.save_collection(guild_id, interaction.user.id, collection)
 
     await interaction.response.defer(thinking=True)
 
@@ -318,20 +321,20 @@ async def roll_cmd(interaction: discord.Interaction):
         except Exception as exc:
             print(f"roll error for user {interaction.user.id}: {exc!r}")
             async with storage.collection_lock:
-                collection = storage.get_collection(interaction.user.id)
+                collection = storage.get_collection(guild_id, interaction.user.id)
                 collection["charges"] = min(gacha.MAX_ROLL_CHARGES, collection.get("charges", 0) + 1)
                 # Restore the boost to its pre-decrement state too, since this
                 # roll attempt never actually happened.
                 if boost_before_use is not None:
                     collection["roll_boost"] = boost_before_use
-                storage.save_collection(interaction.user.id, collection)
+                storage.save_collection(guild_id, interaction.user.id, collection)
             await interaction.followup.send("Couldn't fetch the skin pool right now. Try again shortly.")
             return
 
     async with storage.collection_lock:
-        collection = storage.get_collection(interaction.user.id)
+        collection = storage.get_collection(guild_id, interaction.user.id)
         collection["items"].append(item)
-        storage.save_collection(interaction.user.id, collection)
+        storage.save_collection(guild_id, interaction.user.id, collection)
 
     rolls_left = collection["charges"]
     embed = discord.Embed(
@@ -348,11 +351,13 @@ async def roll_cmd(interaction: discord.Interaction):
 async def collection_cmd(interaction: discord.Interaction):
     if not await _check_channel_lock(interaction, "roll"):
         return
+    if interaction.guild is None:
+        return
 
     async with storage.collection_lock:
-        collection = storage.get_collection(interaction.user.id)
+        collection = storage.get_collection(interaction.guild.id, interaction.user.id)
         gacha.sync_roll_charges(collection)
-        storage.save_collection(interaction.user.id, collection)
+        storage.save_collection(interaction.guild.id, interaction.user.id, collection)
 
     charges_line = f"🔋 Roll charges: **{collection['charges']}/{gacha.MAX_ROLL_CHARGES}**"
 
@@ -388,8 +393,16 @@ TRADE_TIMEOUT_SECONDS = 3600  # 1 hour
 
 
 class TradeView(discord.ui.View):
-    def __init__(self, proposer: discord.Member, responder: discord.Member, offer_item: dict, request_item: dict):
+    def __init__(
+        self,
+        guild_id: int,
+        proposer: discord.Member,
+        responder: discord.Member,
+        offer_item: dict,
+        request_item: dict,
+    ):
         super().__init__(timeout=TRADE_TIMEOUT_SECONDS)
+        self.guild_id = guild_id
         self.proposer = proposer
         self.responder = responder
         self.offer_item = offer_item
@@ -424,8 +437,8 @@ class TradeView(discord.ui.View):
             await interaction.response.send_message("This trade offer isn't for you.", ephemeral=True)
             return
 
-        proposer_collection = storage.get_collection(self.proposer.id)
-        responder_collection = storage.get_collection(self.responder.id)
+        proposer_collection = storage.get_collection(self.guild_id, self.proposer.id)
+        responder_collection = storage.get_collection(self.guild_id, self.responder.id)
 
         given = gacha.pop_item(proposer_collection, self.offer_item["name"])
         received = gacha.pop_item(responder_collection, self.request_item["name"])
@@ -446,8 +459,8 @@ class TradeView(discord.ui.View):
 
         proposer_collection["items"].append(received)
         responder_collection["items"].append(given)
-        storage.save_collection(self.proposer.id, proposer_collection)
-        storage.save_collection(self.responder.id, responder_collection)
+        storage.save_collection(self.guild_id, self.proposer.id, proposer_collection)
+        storage.save_collection(self.guild_id, self.responder.id, responder_collection)
 
         await interaction.response.edit_message(
             content=f"✅ Trade completed between {self.proposer.display_name} and {self.responder.display_name}!",
@@ -471,7 +484,9 @@ class TradeView(discord.ui.View):
 
 
 async def _offer_autocomplete(interaction: discord.Interaction, current: str):
-    collection = storage.get_collection(interaction.user.id)
+    if interaction.guild is None:
+        return []
+    collection = storage.get_collection(interaction.guild.id, interaction.user.id)
     names = sorted({item["name"] for item in collection.get("items", [])})
     matches = [n for n in names if current.lower() in n.lower()][:25]
     return [app_commands.Choice(name=n, value=n) for n in matches]
@@ -480,9 +495,9 @@ async def _offer_autocomplete(interaction: discord.Interaction, current: str):
 async def _member_collection_autocomplete(interaction: discord.Interaction, current: str):
     """Autocompletes item names from whichever member is bound to the command's `user` option."""
     target = interaction.namespace.user
-    if not target:
+    if not target or interaction.guild is None:
         return []
-    collection = storage.get_collection(target.id)
+    collection = storage.get_collection(interaction.guild.id, target.id)
     names = sorted({item["name"] for item in collection.get("items", [])})
     matches = [n for n in names if current.lower() in n.lower()][:25]
     return [app_commands.Choice(name=n, value=n) for n in matches]
@@ -509,6 +524,8 @@ def _is_mod_or_admin(interaction: discord.Interaction) -> bool:
 async def trade_cmd(interaction: discord.Interaction, user: discord.Member, offer: str, request: str):
     if not await _check_channel_lock(interaction, "roll"):
         return
+    if interaction.guild is None:
+        return
 
     if user.id == interaction.user.id:
         await interaction.response.send_message("You can't trade with yourself.", ephemeral=True)
@@ -528,8 +545,8 @@ async def trade_cmd(interaction: discord.Interaction, user: discord.Member, offe
         )
         return
 
-    my_collection = storage.get_collection(interaction.user.id)
-    their_collection = storage.get_collection(user.id)
+    my_collection = storage.get_collection(interaction.guild.id, interaction.user.id)
+    their_collection = storage.get_collection(interaction.guild.id, user.id)
 
     my_item = gacha.find_item(my_collection, offer)
     their_item = gacha.find_item(their_collection, request)
@@ -545,7 +562,13 @@ async def trade_cmd(interaction: discord.Interaction, user: discord.Member, offe
         )
         return
 
-    view = TradeView(proposer=interaction.user, responder=user, offer_item=my_item, request_item=their_item)
+    view = TradeView(
+        guild_id=interaction.guild.id,
+        proposer=interaction.user,
+        responder=user,
+        offer_item=my_item,
+        request_item=their_item,
+    )
     active_trades[interaction.user.id] = view
     active_trades[user.id] = view
     embed = discord.Embed(title="🔄 Trade Offer", color=discord.Color.blue())
@@ -598,6 +621,8 @@ async def give_cmd(interaction: discord.Interaction, user: discord.Member, skin:
     if not _is_mod_or_admin(interaction):
         await interaction.response.send_message("Only mods or admins can do that.", ephemeral=True)
         return
+    if interaction.guild is None:
+        return
 
     await interaction.response.defer(ephemeral=True, thinking=True)
     async with aiohttp.ClientSession() as http:
@@ -607,9 +632,9 @@ async def give_cmd(interaction: discord.Interaction, user: discord.Member, skin:
         await interaction.followup.send(f"No skin named \"{skin}\" found.", ephemeral=True)
         return
 
-    collection = storage.get_collection(user.id)
+    collection = storage.get_collection(interaction.guild.id, user.id)
     collection["items"].append(gacha.stamp(item))
-    storage.save_collection(user.id, collection)
+    storage.save_collection(interaction.guild.id, user.id, collection)
     await interaction.followup.send(
         f"🎁 Gave **{item['name']}** ({item['rarity']}) to {user.display_name}.", ephemeral=True
     )
@@ -641,6 +666,8 @@ async def nr_cmd(
     if not _is_mod_or_admin(interaction):
         await interaction.response.send_message("Only mods or admins can do that.", ephemeral=True)
         return
+    if interaction.guild is None:
+        return
 
     await interaction.response.defer(ephemeral=True, thinking=True)
     async with aiohttp.ClientSession() as http:
@@ -651,9 +678,9 @@ async def nr_cmd(
         return
 
     async with storage.collection_lock:
-        collection = storage.get_collection(user.id)
+        collection = storage.get_collection(interaction.guild.id, user.id)
         collection["roll_boost"] = {"item_id": item["id"], "percent": percent, "rolls_left": rolls}
-        storage.save_collection(user.id, collection)
+        storage.save_collection(interaction.guild.id, user.id, collection)
 
     span = "next `/rollskin`" if rolls == 1 else f"next **{rolls}** rolls"
     await interaction.followup.send(
@@ -671,6 +698,8 @@ async def setnextroll_cmd(interaction: discord.Interaction, user: discord.Member
     if not _is_mod_or_admin(interaction):
         await interaction.response.send_message("Only mods or admins can do that.", ephemeral=True)
         return
+    if interaction.guild is None:
+        return
 
     await interaction.response.defer(thinking=True)
     async with aiohttp.ClientSession() as http:
@@ -681,9 +710,9 @@ async def setnextroll_cmd(interaction: discord.Interaction, user: discord.Member
         return
 
     async with storage.collection_lock:
-        collection = storage.get_collection(user.id)
+        collection = storage.get_collection(interaction.guild.id, user.id)
         collection["forced_roll"] = item
-        storage.save_collection(user.id, collection)
+        storage.save_collection(interaction.guild.id, user.id, collection)
 
     await interaction.followup.send(
         f"🎯 {user.display_name}'s next `/rollskin` is guaranteed to be **{item['name']}** ({item['rarity']})."
@@ -701,12 +730,14 @@ async def giverolls_cmd(
     if not _is_mod_or_admin(interaction):
         await interaction.response.send_message("Only mods or admins can do that.", ephemeral=True)
         return
+    if interaction.guild is None:
+        return
 
     async with storage.collection_lock:
-        collection = storage.get_collection(user.id)
+        collection = storage.get_collection(interaction.guild.id, user.id)
         gacha.sync_roll_charges(collection)
         collection["charges"] = collection.get("charges", 0) + amount
-        storage.save_collection(user.id, collection)
+        storage.save_collection(interaction.guild.id, user.id, collection)
         new_total = collection["charges"]
 
     await interaction.response.send_message(
@@ -722,8 +753,10 @@ async def removeskin_cmd(interaction: discord.Interaction, user: discord.Member,
     if not _is_mod_or_admin(interaction):
         await interaction.response.send_message("Only mods or admins can do that.", ephemeral=True)
         return
+    if interaction.guild is None:
+        return
 
-    collection = storage.get_collection(user.id)
+    collection = storage.get_collection(interaction.guild.id, user.id)
     removed = gacha.pop_item(collection, skin)
     if not removed:
         await interaction.response.send_message(
@@ -731,7 +764,7 @@ async def removeskin_cmd(interaction: discord.Interaction, user: discord.Member,
         )
         return
 
-    storage.save_collection(user.id, collection)
+    storage.save_collection(interaction.guild.id, user.id, collection)
     await interaction.response.send_message(
         f"🗑️ Removed **{removed['name']}** from {user.display_name}'s collection.", ephemeral=True
     )
@@ -743,8 +776,10 @@ async def removeallcollection_cmd(interaction: discord.Interaction, user: discor
     if not _is_mod_or_admin(interaction):
         await interaction.response.send_message("Only mods or admins can do that.", ephemeral=True)
         return
+    if interaction.guild is None:
+        return
 
-    deleted = storage.delete_collection(user.id)
+    deleted = storage.delete_collection(interaction.guild.id, user.id)
     if not deleted:
         await interaction.response.send_message(
             f"{user.display_name} doesn't have a collection to wipe.", ephemeral=True
