@@ -33,7 +33,7 @@ RARITY_WEIGHTS = {"Select": 36, "Deluxe": 25, "Premium": 17, "Exclusive": 8, AGE
 # Embed accent color per rarity (hex, 0xRRGGBB) - kept mid-toned, not neon or dark.
 RARITY_COLORS = {
     "Select": 0x104A6D,  # dark navy blue
-    "Deluxe": 0xF59858,  # orange
+    "Deluxe": 0x126860,  # dark teal
     "Premium": 0xE0529C,  # pink
     "Exclusive": 0xF59858,  # orange
     AGENT_CATEGORY: 0xE63946,  # red
