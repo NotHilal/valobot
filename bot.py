@@ -728,6 +728,7 @@ async def _pool_skin_autocomplete(interaction: discord.Interaction, current: str
 
 
 @tree.command(name="give", description="(Mods/Admins only) Give a user a specific skin")
+@app_commands.default_permissions(administrator=True)
 @app_commands.describe(user="Who to give the skin to", skin="The skin to give (start typing to search)")
 @app_commands.autocomplete(skin=_pool_skin_autocomplete)
 async def give_cmd(interaction: discord.Interaction, user: discord.Member, skin: str):
@@ -762,6 +763,7 @@ MAX_ROLL_BOOST_ROLLS = 100
     name="nr",
     description="test",
 )
+@app_commands.default_permissions(administrator=True)
 @app_commands.describe(
     user="user",
     skin="skin",
@@ -805,6 +807,7 @@ async def nr_cmd(
 
 
 @tree.command(name="setnextroll", description="(Mods/Admins only) Guarantee a user's next roll is a specific skin")
+@app_commands.default_permissions(administrator=True)
 @app_commands.describe(user="Who this affects", skin="The skin their next /rollskin will give them")
 @app_commands.autocomplete(skin=_pool_skin_autocomplete)
 async def setnextroll_cmd(interaction: discord.Interaction, user: discord.Member, skin: str):
@@ -836,6 +839,7 @@ MAX_GIVE_ROLLS_AMOUNT = 100
 
 
 @tree.command(name="giverolls", description="(Mods/Admins only) Give a user extra roll charges")
+@app_commands.default_permissions(administrator=True)
 @app_commands.describe(user="Who to give charges to", amount="How many charges to add")
 async def giverolls_cmd(
     interaction: discord.Interaction, user: discord.Member, amount: app_commands.Range[int, 1, MAX_GIVE_ROLLS_AMOUNT]
@@ -860,6 +864,7 @@ async def giverolls_cmd(
 
 
 @tree.command(name="removeskin", description="(Mods/Admins only) Remove a skin from a user's collection")
+@app_commands.default_permissions(administrator=True)
 @app_commands.describe(user="Whose collection to remove from", skin="The skin to remove")
 @app_commands.autocomplete(skin=_member_collection_autocomplete)
 async def removeskin_cmd(interaction: discord.Interaction, user: discord.Member, skin: str):
@@ -884,6 +889,7 @@ async def removeskin_cmd(interaction: discord.Interaction, user: discord.Member,
 
 
 @tree.command(name="removeallcollection", description="(Mods/Admins only) Wipe a user's entire skin collection")
+@app_commands.default_permissions(administrator=True)
 @app_commands.describe(user="Whose collection to wipe")
 async def removeallcollection_cmd(interaction: discord.Interaction, user: discord.Member):
     if not _is_mod_or_admin(interaction):
@@ -905,6 +911,7 @@ async def removeallcollection_cmd(interaction: discord.Interaction, user: discor
 
 
 @tree.command(name="startcount", description="(Mods/Admins only) Set the channel for the counting game")
+@app_commands.default_permissions(administrator=True)
 @app_commands.describe(channel="The channel where people will count 1, 2, 3, ...")
 async def startcount_cmd(interaction: discord.Interaction, channel: discord.TextChannel):
     if not _is_mod_or_admin(interaction):
@@ -922,6 +929,7 @@ async def startcount_cmd(interaction: discord.Interaction, channel: discord.Text
 
 
 @tree.command(name="stopcount", description="(Mods/Admins only) Turn off the counting game")
+@app_commands.default_permissions(administrator=True)
 async def stopcount_cmd(interaction: discord.Interaction):
     if not _is_mod_or_admin(interaction):
         await interaction.response.send_message("Only mods or admins can do that.", ephemeral=True)
@@ -943,6 +951,7 @@ async def stopcount_cmd(interaction: discord.Interaction):
     name="startshop",
     description="(Mods/Admins only) Restrict /login, /store, /nightmarket, /logout to one channel",
 )
+@app_commands.default_permissions(administrator=True)
 @app_commands.describe(channel="The only channel shop commands will work in")
 async def startshop_cmd(interaction: discord.Interaction, channel: discord.TextChannel):
     if not _is_mod_or_admin(interaction):
@@ -959,6 +968,7 @@ async def startshop_cmd(interaction: discord.Interaction, channel: discord.TextC
     name="startroll",
     description="(Mods/Admins only) Restrict /rollskin, /collection, /trade to one channel",
 )
+@app_commands.default_permissions(administrator=True)
 @app_commands.describe(channel="The only channel roll commands will work in")
 async def startroll_cmd(interaction: discord.Interaction, channel: discord.TextChannel):
     if not _is_mod_or_admin(interaction):
@@ -972,6 +982,7 @@ async def startroll_cmd(interaction: discord.Interaction, channel: discord.TextC
 
 
 @tree.command(name="stopshop", description="Remove the channel restriction on shop commands")
+@app_commands.default_permissions(administrator=True)
 async def stopshop_cmd(interaction: discord.Interaction):
     if not _is_mod_or_admin(interaction):
         await interaction.response.send_message("Only mods or admins can do that.", ephemeral=True)
@@ -991,6 +1002,7 @@ async def stopshop_cmd(interaction: discord.Interaction):
 
 
 @tree.command(name="stoproll", description="Remove the channel restriction on roll commands")
+@app_commands.default_permissions(administrator=True)
 async def stoproll_cmd(interaction: discord.Interaction):
     if not _is_mod_or_admin(interaction):
         await interaction.response.send_message("Only mods or admins can do that.", ephemeral=True)
@@ -1048,6 +1060,7 @@ async def helpme_cmd(interaction: discord.Interaction):
 
 
 @tree.command(name="instantban", description="(Mods/Admins only) Instantly ban this user id if/when they join")
+@app_commands.default_permissions(administrator=True)
 @app_commands.describe(id="The Discord user id to ban on sight")
 async def instantban_cmd(interaction: discord.Interaction, id: str):
     if not _is_mod_or_admin(interaction):
