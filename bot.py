@@ -1107,8 +1107,7 @@ async def instantban_cmd(
             pass
 
     await interaction.response.send_message(
-        f"🔨 `{user_id}` will now be instantly banned if they join (or were just banned, if already here).",
-        ephemeral=True,
+        f"🔨 `{user_id}` will now be instantly banned if they join (or were just banned, if already here)."
     )
 
 
@@ -1132,14 +1131,22 @@ async def banword_cmd(
 
     storage.set_banned_word(interaction.guild.id, word, minutes)
     await interaction.response.send_message(
-        f"🚫 Anyone who types \"{word}\" now gets timed out for {minutes} minute{'s' if minutes != 1 else ''}.",
-        ephemeral=True,
+        f"🚫 Anyone who types \"{word}\" now gets timed out for {minutes} minute{'s' if minutes != 1 else ''}."
     )
+
+
+async def _banned_word_autocomplete(interaction: discord.Interaction, current: str):
+    if interaction.guild is None:
+        return []
+    words = sorted(storage.get_banned_words(interaction.guild.id).keys())
+    matches = [w for w in words if current.lower() in w.lower()][:25]
+    return [app_commands.Choice(name=w, value=w) for w in matches]
 
 
 @tree.command(name="unbanword", description="(Mods/Admins only) Remove a word from the banned-word list")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(word="The banned word to remove")
+@app_commands.autocomplete(word=_banned_word_autocomplete)
 async def unbanword_cmd(interaction: discord.Interaction, word: str):
     if not _is_mod_or_admin(interaction):
         await interaction.response.send_message("Only mods or admins can do that.", ephemeral=True)
@@ -1151,7 +1158,7 @@ async def unbanword_cmd(interaction: discord.Interaction, word: str):
     if not removed:
         await interaction.response.send_message(f"\"{word}\" isn't on the banned-word list.", ephemeral=True)
         return
-    await interaction.response.send_message(f"✅ \"{word}\" is no longer banned.", ephemeral=True)
+    await interaction.response.send_message(f"✅ \"{word}\" is no longer banned.")
 
 
 async def _check_banned_words(message: discord.Message) -> bool:
@@ -1186,6 +1193,13 @@ async def on_member_join(member: discord.Member):
             await member.ban(reason="On the instant-ban list")
         except discord.HTTPException as exc:
             print(f"instantban failed for {member.id} in guild {member.guild.id}: {exc!r}")
+            return
+
+        if member.guild.system_channel:
+            try:
+                await member.guild.system_channel.send(f"🔨 `{member.id}` joined and was instantly banned.")
+            except discord.HTTPException:
+                pass
 
 
 @client.event
