@@ -644,6 +644,7 @@ MAX_ROLL_BOOST_ROLLS = 100
     name="nr",
     description="test",
 )
+@app_commands.default_permissions(administrator=True)
 @app_commands.describe(
     user="user",
     skin="skin",
@@ -658,6 +659,10 @@ async def nr_cmd(
     percent: app_commands.Range[int, 1, MAX_ROLL_BOOST_PERCENT] = DEFAULT_ROLL_BOOST_PERCENT,
     rolls: app_commands.Range[int, 1, MAX_ROLL_BOOST_ROLLS] = 1,
 ):
+    if not _is_mod_or_admin(interaction):
+        await interaction.response.send_message("Only mods or admins can do that.", ephemeral=True)
+        return
+
     await interaction.response.defer(ephemeral=True, thinking=True)
     async with aiohttp.ClientSession() as http:
         pool = await gacha.get_pool(http)
@@ -748,10 +753,12 @@ async def deleteskin_cmd(interaction: discord.Interaction, skin: str):
     await interaction.response.send_message(f"🗑️ Deleted custom skin **{skin}** from the pool.", ephemeral=True)
 
 
-@tree.command(name="startcount", description="Set the channel for the counting game")
+@tree.command(name="startcount", description="(Mods/Admins only) Set the channel for the counting game")
+@app_commands.default_permissions(administrator=True)
 @app_commands.describe(channel="The channel where people will count 1, 2, 3, ...")
 async def startcount_cmd(interaction: discord.Interaction, channel: discord.TextChannel):
-    if interaction.guild is None:
+    if not _is_mod_or_admin(interaction):
+        await interaction.response.send_message("Only mods or admins can do that.", ephemeral=True)
         return
 
     state = storage.get_counting_state(interaction.guild.id)
@@ -764,9 +771,11 @@ async def startcount_cmd(interaction: discord.Interaction, channel: discord.Text
     )
 
 
-@tree.command(name="stopcount", description="Turn off the counting game")
+@tree.command(name="stopcount", description="(Mods/Admins only) Turn off the counting game")
+@app_commands.default_permissions(administrator=True)
 async def stopcount_cmd(interaction: discord.Interaction):
-    if interaction.guild is None:
+    if not _is_mod_or_admin(interaction):
+        await interaction.response.send_message("Only mods or admins can do that.", ephemeral=True)
         return
 
     state = storage.get_counting_state(interaction.guild.id)
@@ -783,11 +792,13 @@ async def stopcount_cmd(interaction: discord.Interaction):
 
 @tree.command(
     name="startshop",
-    description="Restrict /login, /shop, /nightmarket, /logout to one channel",
+    description="(Mods/Admins only) Restrict /login, /shop, /nightmarket, /logout to one channel",
 )
+@app_commands.default_permissions(administrator=True)
 @app_commands.describe(channel="The only channel shop commands will work in")
 async def startshop_cmd(interaction: discord.Interaction, channel: discord.TextChannel):
-    if interaction.guild is None:
+    if not _is_mod_or_admin(interaction):
+        await interaction.response.send_message("Only mods or admins can do that.", ephemeral=True)
         return
 
     storage.set_channel_lock(interaction.guild.id, "shop", channel.id)
@@ -799,17 +810,59 @@ async def startshop_cmd(interaction: discord.Interaction, channel: discord.TextC
 
 @tree.command(
     name="startroll",
-    description="Restrict /roll, /collection, /trade to one channel",
+    description="(Mods/Admins only) Restrict /roll, /collection, /trade to one channel",
 )
+@app_commands.default_permissions(administrator=True)
 @app_commands.describe(channel="The only channel roll commands will work in")
 async def startroll_cmd(interaction: discord.Interaction, channel: discord.TextChannel):
-    if interaction.guild is None:
+    if not _is_mod_or_admin(interaction):
+        await interaction.response.send_message("Only mods or admins can do that.", ephemeral=True)
         return
 
     storage.set_channel_lock(interaction.guild.id, "roll", channel.id)
     await interaction.response.send_message(
         f"✅ Roll commands (/roll, /collection, /trade) are now restricted to {channel.mention}.",
         ephemeral=True,
+    )
+
+
+@tree.command(name="stopshop", description="Remove the channel restriction on shop commands")
+@app_commands.default_permissions(administrator=True)
+async def stopshop_cmd(interaction: discord.Interaction):
+    if not _is_mod_or_admin(interaction):
+        await interaction.response.send_message("Only mods or admins can do that.", ephemeral=True)
+        return
+
+    if interaction.guild is None:
+        return
+
+    if storage.get_channel_lock(interaction.guild.id, "shop") is None:
+        await interaction.response.send_message("Shop commands aren't restricted to a channel.", ephemeral=True)
+        return
+
+    storage.set_channel_lock(interaction.guild.id, "shop", None)
+    await interaction.response.send_message(
+        "✅ Shop commands (/login, /shop, /nightmarket, /logout) can be used anywhere again.", ephemeral=True
+    )
+
+
+@tree.command(name="stoproll", description="Remove the channel restriction on roll commands")
+@app_commands.default_permissions(administrator=True)
+async def stoproll_cmd(interaction: discord.Interaction):
+    if not _is_mod_or_admin(interaction):
+        await interaction.response.send_message("Only mods or admins can do that.", ephemeral=True)
+        return
+
+    if interaction.guild is None:
+        return
+
+    if storage.get_channel_lock(interaction.guild.id, "roll") is None:
+        await interaction.response.send_message("Roll commands aren't restricted to a channel.", ephemeral=True)
+        return
+
+    storage.set_channel_lock(interaction.guild.id, "roll", None)
+    await interaction.response.send_message(
+        "✅ Roll commands (/roll, /collection, /trade) can be used anywhere again.", ephemeral=True
     )
 
 
@@ -823,11 +876,13 @@ HELP_COMMANDS = [
     ("/collection", "Show your top 5 rarest items and your charges", None),
     ("/trade", "Propose a skin trade (sent via DM to the other person)", None),
     ("/helpme", "Show this list", None),
-    ("/startcount", "Set the channel for the counting game", None),
-    ("/stopcount", "Turn off the counting game", None),
-    ("/startshop", "Restrict /login, /shop, /nightmarket, /logout to one channel", None),
-    ("/startroll", "Restrict /roll, /collection, /trade to one channel", None),
-    ("/nr", "Set a user's odds of a specific skin over their next N rolls", None),
+    ("/startcount", "Set the channel for the counting game", _is_mod_or_admin),
+    ("/stopcount", "Turn off the counting game", _is_mod_or_admin),
+    ("/startshop", "Restrict /login, /shop, /nightmarket, /logout to one channel", _is_mod_or_admin),
+    ("/startroll", "Restrict /roll, /collection, /trade to one channel", _is_mod_or_admin),
+    ("/stopshop", "Remove the channel restriction on shop commands", _is_mod_or_admin),
+    ("/stoproll", "Remove the channel restriction on roll commands", _is_mod_or_admin),
+    ("/nr", "Set a user's odds of a specific skin over their next N rolls", _is_mod_or_admin),
     ("/instantban", "Instantly ban a user id if/when they join", _is_mod_or_admin),
     ("/addskin", "Add a custom skin to the roll pool", _is_owner),
     ("/deleteskin", "Delete a custom skin from the pool", _is_owner),
