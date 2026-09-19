@@ -1,4 +1,4 @@
-"""Minimal Discord bot: /login, /shop, /logout for a personal VALORANT shop viewer,
+"""Minimal Discord bot: /login, /store, /logout for a personal VALORANT shop viewer,
 plus /roll, /collection, /trade for a daily skin-collecting side game,
 plus a counting game in a designated channel."""
 
@@ -64,7 +64,7 @@ class LoginLinkModal(discord.ui.Modal, title="Paste your login link"):
         storage.save_user(interaction.user.id, session)
         name = session.get("riot_id") or "your account"
         await interaction.followup.send(
-            f"✅ Logged in as **{name}**. Use `/shop` to see your daily store.", ephemeral=True
+            f"✅ Logged in as **{name}**. Use `/store` to see your daily store.", ephemeral=True
         )
 
 
@@ -120,7 +120,7 @@ async def login(interaction: discord.Interaction):
     )
 
 
-@tree.command(name="shop", description="Show your daily VALORANT storefront")
+@tree.command(name="store", description="Show your daily VALORANT storefront")
 async def shop(interaction: discord.Interaction):
     if not await _check_channel_lock(interaction, "shop"):
         return
@@ -784,7 +784,7 @@ async def stopcount_cmd(interaction: discord.Interaction):
 
 @tree.command(
     name="startshop",
-    description="(Mods/Admins only) Restrict /login, /shop, /nightmarket, /logout to one channel",
+    description="(Mods/Admins only) Restrict /login, /store, /nightmarket, /logout to one channel",
 )
 @app_commands.describe(channel="The only channel shop commands will work in")
 async def startshop_cmd(interaction: discord.Interaction, channel: discord.TextChannel):
@@ -794,7 +794,7 @@ async def startshop_cmd(interaction: discord.Interaction, channel: discord.TextC
 
     storage.set_channel_lock(interaction.guild.id, "shop", channel.id)
     await interaction.response.send_message(
-        f"✅ Shop commands (/login, /shop, /nightmarket, /logout) are now restricted to {channel.mention}."
+        f"✅ Shop commands (/login, /store, /nightmarket, /logout) are now restricted to {channel.mention}."
     )
 
 
@@ -829,7 +829,7 @@ async def stopshop_cmd(interaction: discord.Interaction):
 
     storage.set_channel_lock(interaction.guild.id, "shop", None)
     await interaction.response.send_message(
-        "✅ Shop commands (/login, /shop, /nightmarket, /logout) can be used anywhere again."
+        "✅ Shop commands (/login, /store, /nightmarket, /logout) can be used anywhere again."
     )
 
 
@@ -855,7 +855,7 @@ async def stoproll_cmd(interaction: discord.Interaction):
 # (display text, description, permission check - None means everyone can use it)
 HELP_COMMANDS = [
     ("/login", "Link your Riot account to see your daily VALORANT shop", None),
-    ("/shop", "Show your daily VALORANT storefront", None),
+    ("/store", "Show your daily VALORANT storefront", None),
     ("/nightmarket", "Show your Night Market bonus offers, if the event is running", None),
     ("/logout", "logout your account", None),
     ("/roll", "Roll for a random skin or agent (2 charges, +1 at Paris midnight/noon)", None),
@@ -864,7 +864,7 @@ HELP_COMMANDS = [
     ("/helpme", "Show this list", None),
     ("/startcount", "Set the channel for the counting game", _is_mod_or_admin),
     ("/stopcount", "Turn off the counting game", _is_mod_or_admin),
-    ("/startshop", "Restrict /login, /shop, /nightmarket, /logout to one channel", _is_mod_or_admin),
+    ("/startshop", "Restrict /login, /store, /nightmarket, /logout to one channel", _is_mod_or_admin),
     ("/startroll", "Restrict /roll, /collection, /trade to one channel", _is_mod_or_admin),
     ("/stopshop", "Remove the channel restriction on shop commands", _is_mod_or_admin),
     ("/stoproll", "Remove the channel restriction on roll commands", _is_mod_or_admin),
