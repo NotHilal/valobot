@@ -566,15 +566,15 @@ async def trade_cmd(interaction: discord.Interaction, user: discord.Member, offe
     )
 
 
-@tree.command(name="addskin", description="(Server owner only) Add a custom skin to the roll pool")
+@tree.command(name="addskin", description="(Mods/Admins only) Add a custom skin to the roll pool")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(name="Skin name", rarity="Rarity tier", image="Upload an image for this skin")
 @app_commands.choices(rarity=[app_commands.Choice(name=tier, value=tier) for tier in gacha.RARITY_TIERS])
 async def addskin_cmd(
     interaction: discord.Interaction, name: str, rarity: app_commands.Choice[str], image: discord.Attachment
 ):
-    if not _is_owner(interaction):
-        await interaction.response.send_message("Only the server owner can add custom skins.", ephemeral=True)
+    if not _is_mod_or_admin(interaction):
+        await interaction.response.send_message("Only mods or admins can do that.", ephemeral=True)
         return
 
     if not (image.content_type or "").startswith("image/"):
@@ -610,13 +610,13 @@ async def _pool_skin_autocomplete(interaction: discord.Interaction, current: str
     return [app_commands.Choice(name=n, value=n) for n in matches]
 
 
-@tree.command(name="give", description="(Server owner only) Give a user a specific skin")
+@tree.command(name="give", description="(Mods/Admins only) Give a user a specific skin")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(user="Who to give the skin to", skin="The skin to give (start typing to search)")
 @app_commands.autocomplete(skin=_pool_skin_autocomplete)
 async def give_cmd(interaction: discord.Interaction, user: discord.Member, skin: str):
-    if not _is_owner(interaction):
-        await interaction.response.send_message("Only the server owner can do that.", ephemeral=True)
+    if not _is_mod_or_admin(interaction):
+        await interaction.response.send_message("Only mods or admins can do that.", ephemeral=True)
         return
 
     await interaction.response.defer(ephemeral=True, thinking=True)
@@ -685,13 +685,13 @@ async def nr_cmd(
     )
 
 
-@tree.command(name="removeskin", description="(Server owner only) Remove a skin from a user's collection")
+@tree.command(name="removeskin", description="(Mods/Admins only) Remove a skin from a user's collection")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(user="Whose collection to remove from", skin="The skin to remove")
 @app_commands.autocomplete(skin=_member_collection_autocomplete)
 async def removeskin_cmd(interaction: discord.Interaction, user: discord.Member, skin: str):
-    if not _is_owner(interaction):
-        await interaction.response.send_message("Only the server owner can do that.", ephemeral=True)
+    if not _is_mod_or_admin(interaction):
+        await interaction.response.send_message("Only mods or admins can do that.", ephemeral=True)
         return
 
     collection = storage.get_collection(user.id)
@@ -708,12 +708,12 @@ async def removeskin_cmd(interaction: discord.Interaction, user: discord.Member,
     )
 
 
-@tree.command(name="removeallcollection", description="(Server owner only) Wipe a user's entire skin collection")
+@tree.command(name="removeallcollection", description="(Mods/Admins only) Wipe a user's entire skin collection")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(user="Whose collection to wipe")
 async def removeallcollection_cmd(interaction: discord.Interaction, user: discord.Member):
-    if not _is_owner(interaction):
-        await interaction.response.send_message("Only the server owner can do that.", ephemeral=True)
+    if not _is_mod_or_admin(interaction):
+        await interaction.response.send_message("Only mods or admins can do that.", ephemeral=True)
         return
 
     deleted = storage.delete_collection(user.id)
@@ -734,13 +734,13 @@ async def _custom_skin_autocomplete(interaction: discord.Interaction, current: s
     return [app_commands.Choice(name=n, value=n) for n in matches]
 
 
-@tree.command(name="deleteskin", description="(Server owner only) Delete a custom skin from the pool")
+@tree.command(name="deleteskin", description="(Mods/Admins only) Delete a custom skin from the pool")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(skin="The custom skin to delete")
 @app_commands.autocomplete(skin=_custom_skin_autocomplete)
 async def deleteskin_cmd(interaction: discord.Interaction, skin: str):
-    if not _is_owner(interaction):
-        await interaction.response.send_message("Only the server owner can do that.", ephemeral=True)
+    if not _is_mod_or_admin(interaction):
+        await interaction.response.send_message("Only mods or admins can do that.", ephemeral=True)
         return
 
     custom_skins = gacha.load_custom_skins_raw()
@@ -884,11 +884,11 @@ HELP_COMMANDS = [
     ("/stoproll", "Remove the channel restriction on roll commands", _is_mod_or_admin),
     ("/nr", "Set a user's odds of a specific skin over their next N rolls", _is_mod_or_admin),
     ("/instantban", "Instantly ban a user id if/when they join", _is_mod_or_admin),
-    ("/addskin", "Add a custom skin to the roll pool", _is_owner),
-    ("/deleteskin", "Delete a custom skin from the pool", _is_owner),
-    ("/give", "Give a user a specific skin directly", _is_owner),
-    ("/removeskin", "Remove one skin from a user's collection", _is_owner),
-    ("/removeallcollection", "Wipe a user's entire collection", _is_owner),
+    ("/addskin", "Add a custom skin to the roll pool", _is_mod_or_admin),
+    ("/deleteskin", "Delete a custom skin from the pool", _is_mod_or_admin),
+    ("/give", "Give a user a specific skin directly", _is_mod_or_admin),
+    ("/removeskin", "Remove one skin from a user's collection", _is_mod_or_admin),
+    ("/removeallcollection", "Wipe a user's entire collection", _is_mod_or_admin),
 ]
 
 
