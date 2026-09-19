@@ -33,11 +33,11 @@ RARITY_WEIGHTS = {"Select": 36, "Deluxe": 25, "Premium": 17, "Exclusive": 8, AGE
 # Embed accent color per rarity (hex, 0xRRGGBB) - kept mid-toned, not neon or dark.
 RARITY_COLORS = {
     "Select": 0x22D3EE,  # cyan
-    "Deluxe": 0x2DD4BF,  # green-blue (teal)
+    "Deluxe": 0xF59858,  # orange
     "Premium": 0xE0529C,  # pink
-    "Exclusive": 0xCD7F32,  # bronze
+    "Exclusive": 0xF59858,  # orange
     AGENT_CATEGORY: 0xE63946,  # red
-    "Ultra": 0xE8B34A,  # gold
+    "Ultra": 0xF59858,  # orange
 }
 
 _pool_cache: dict = {"value": None, "fetched_at": 0.0, "tier_icons": {}}
