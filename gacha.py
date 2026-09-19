@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import random
@@ -13,6 +14,7 @@ import aiohttp
 
 VALORANT_API_BASE = "https://valorant-api.com/v1"
 CUSTOM_SKINS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "custom_skins.json")
+ICON_OVERRIDES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon_overrides.json")
 
 # Rarity tiers, lowest to highest - matches valorant-api.com's real content tiers.
 # These are the only tiers offered as choices for admin-added custom skins.
@@ -29,6 +31,33 @@ RARITY_WEIGHTS = {"Select": 36, "Deluxe": 25, "Premium": 17, "Exclusive": 8, AGE
 
 _pool_cache: dict = {"value": None, "fetched_at": 0.0, "tier_icons": {}}
 _POOL_TTL_SECONDS = 24 * 3600
+
+# Discord's embed image renderer can fail (or take too long) on very large
+# external images, showing no image at all. A handful of skins on
+# valorant-api.com have multi-megabyte icons, so anything over this size is
+# dropped from the roll pool.
+MAX_ICON_BYTES = 1_500_000
+
+
+async def _icon_is_too_large(http: aiohttp.ClientSession, url: str) -> bool:
+    try:
+        async with http.head(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            content_length = resp.headers.get("Content-Length")
+            return bool(content_length) and int(content_length) > MAX_ICON_BYTES
+    except aiohttp.ClientError:
+        return False  # can't tell - don't exclude a skin over a transient network hiccup
+
+
+def load_icon_overrides() -> dict[str, str]:
+    """Maps a skin/agent name to a replacement icon URL, used instead of the
+    official one - for cases like an oversized official image."""
+    if not os.path.exists(ICON_OVERRIDES_FILE):
+        return {}
+    try:
+        with open(ICON_OVERRIDES_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {}
 
 
 async def _fetch_agents(http: aiohttp.ClientSession) -> list[dict]:
@@ -80,6 +109,25 @@ async def _fetch_official_pool(http: aiohttp.ClientSession) -> tuple[dict[str, l
         )
 
     pool[AGENT_CATEGORY] = await _fetch_agents(http)
+
+    overrides = load_icon_overrides()
+    all_items = [item for items in pool.values() for item in items]
+    sem = asyncio.Semaphore(30)
+    too_large_ids: set[str] = set()
+
+    async def _check(item: dict) -> None:
+        override_url = overrides.get(item["name"])
+        if override_url:
+            item["icon"] = override_url
+            return  # manually-provided replacement - trust it, skip the size check
+        async with sem:
+            if await _icon_is_too_large(http, item["icon"]):
+                too_large_ids.add(item["id"])
+
+    await asyncio.gather(*(_check(item) for item in all_items))
+    if too_large_ids:
+        pool = {rarity: [item for item in items if item["id"] not in too_large_ids] for rarity, items in pool.items()}
+
     return pool, tier_icons
 
 

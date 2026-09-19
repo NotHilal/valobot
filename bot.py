@@ -270,6 +270,7 @@ async def roll_cmd(interaction: discord.Interaction):
     if not await _check_channel_lock(interaction, "roll"):
         return
 
+    forced_item = None
     roll_boost = None
     boost_before_use = None
     async with storage.collection_lock:
@@ -291,35 +292,41 @@ async def roll_cmd(interaction: discord.Interaction):
         # same charge twice.
         collection["charges"] -= 1
 
-        active_boost = collection.get("roll_boost")
-        if active_boost:
-            boost_before_use = dict(active_boost)
-            roll_boost = {"item_id": active_boost["item_id"], "percent": active_boost["percent"]}
-            active_boost["rolls_left"] -= 1
-            if active_boost["rolls_left"] <= 0:
-                collection.pop("roll_boost", None)
-            else:
-                collection["roll_boost"] = active_boost
+        # A guaranteed /setnextroll skin takes priority over a /nr odds boost.
+        forced_item = collection.pop("forced_roll", None)
+        if forced_item is None:
+            active_boost = collection.get("roll_boost")
+            if active_boost:
+                boost_before_use = dict(active_boost)
+                roll_boost = {"item_id": active_boost["item_id"], "percent": active_boost["percent"]}
+                active_boost["rolls_left"] -= 1
+                if active_boost["rolls_left"] <= 0:
+                    collection.pop("roll_boost", None)
+                else:
+                    collection["roll_boost"] = active_boost
         storage.save_collection(interaction.user.id, collection)
 
     await interaction.response.defer(thinking=True)
 
-    try:
-        async with aiohttp.ClientSession() as http:
-            pool = await gacha.get_pool(http)
-        item = gacha.roll(pool, boost=roll_boost)
-    except Exception as exc:
-        print(f"roll error for user {interaction.user.id}: {exc!r}")
-        async with storage.collection_lock:
-            collection = storage.get_collection(interaction.user.id)
-            collection["charges"] = min(gacha.MAX_ROLL_CHARGES, collection.get("charges", 0) + 1)
-            # Restore the boost to its pre-decrement state too, since this
-            # roll attempt never actually happened.
-            if boost_before_use is not None:
-                collection["roll_boost"] = boost_before_use
-            storage.save_collection(interaction.user.id, collection)
-        await interaction.followup.send("Couldn't fetch the skin pool right now. Try again shortly.")
-        return
+    if forced_item is not None:
+        item = gacha.stamp(forced_item)
+    else:
+        try:
+            async with aiohttp.ClientSession() as http:
+                pool = await gacha.get_pool(http)
+            item = gacha.roll(pool, boost=roll_boost)
+        except Exception as exc:
+            print(f"roll error for user {interaction.user.id}: {exc!r}")
+            async with storage.collection_lock:
+                collection = storage.get_collection(interaction.user.id)
+                collection["charges"] = min(gacha.MAX_ROLL_CHARGES, collection.get("charges", 0) + 1)
+                # Restore the boost to its pre-decrement state too, since this
+                # roll attempt never actually happened.
+                if boost_before_use is not None:
+                    collection["roll_boost"] = boost_before_use
+                storage.save_collection(interaction.user.id, collection)
+            await interaction.followup.send("Couldn't fetch the skin pool right now. Try again shortly.")
+            return
 
     async with storage.collection_lock:
         collection = storage.get_collection(interaction.user.id)
@@ -566,31 +573,6 @@ async def trade_cmd(interaction: discord.Interaction, user: discord.Member, offe
     )
 
 
-@tree.command(name="addskin", description="(Mods/Admins only) Add a custom skin to the roll pool")
-@app_commands.describe(name="Skin name", rarity="Rarity tier", image="Upload an image for this skin")
-@app_commands.choices(rarity=[app_commands.Choice(name=tier, value=tier) for tier in gacha.RARITY_TIERS])
-async def addskin_cmd(
-    interaction: discord.Interaction, name: str, rarity: app_commands.Choice[str], image: discord.Attachment
-):
-    if not _is_mod_or_admin(interaction):
-        await interaction.response.send_message("Only mods or admins can do that.", ephemeral=True)
-        return
-
-    if not (image.content_type or "").startswith("image/"):
-        await interaction.response.send_message("Please upload an image file.", ephemeral=True)
-        return
-
-    custom_skins = gacha.load_custom_skins_raw()
-    custom_skins.append({"name": name, "rarity": rarity.value, "icon": image.url})
-    gacha.save_custom_skins_raw(custom_skins)
-
-    embed = discord.Embed(
-        title=f"✅ Added custom skin: {name}", description=f"Rarity: **{rarity.value}**", color=discord.Color.green()
-    )
-    embed.set_image(url=image.url)
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-
 async def _pool_skin_autocomplete(interaction: discord.Interaction, current: str):
     if len(current) < 2:
         return []
@@ -682,6 +664,59 @@ async def nr_cmd(
     )
 
 
+@tree.command(name="setnextroll", description="(Mods/Admins only) Guarantee a user's next roll is a specific skin")
+@app_commands.describe(user="Who this affects", skin="The skin their next /rollskin will give them")
+@app_commands.autocomplete(skin=_pool_skin_autocomplete)
+async def setnextroll_cmd(interaction: discord.Interaction, user: discord.Member, skin: str):
+    if not _is_mod_or_admin(interaction):
+        await interaction.response.send_message("Only mods or admins can do that.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    async with aiohttp.ClientSession() as http:
+        pool = await gacha.get_pool(http)
+    item = gacha.find_in_pool(pool, skin)
+    if not item:
+        await interaction.followup.send(f"No skin named \"{skin}\" found.", ephemeral=True)
+        return
+
+    async with storage.collection_lock:
+        collection = storage.get_collection(user.id)
+        collection["forced_roll"] = item
+        storage.save_collection(user.id, collection)
+
+    await interaction.followup.send(
+        f"🎯 {user.display_name}'s next `/rollskin` is guaranteed to be **{item['name']}** ({item['rarity']}).",
+        ephemeral=True,
+    )
+
+
+MAX_GIVE_ROLLS_AMOUNT = 100
+
+
+@tree.command(name="giverolls", description="(Mods/Admins only) Give a user extra roll charges")
+@app_commands.describe(user="Who to give charges to", amount="How many charges to add")
+async def giverolls_cmd(
+    interaction: discord.Interaction, user: discord.Member, amount: app_commands.Range[int, 1, MAX_GIVE_ROLLS_AMOUNT]
+):
+    if not _is_mod_or_admin(interaction):
+        await interaction.response.send_message("Only mods or admins can do that.", ephemeral=True)
+        return
+
+    async with storage.collection_lock:
+        collection = storage.get_collection(user.id)
+        gacha.sync_roll_charges(collection)
+        collection["charges"] = collection.get("charges", 0) + amount
+        storage.save_collection(user.id, collection)
+        new_total = collection["charges"]
+
+    await interaction.response.send_message(
+        f"🔋 Gave {user.display_name} **+{amount}** roll charge{'s' if amount != 1 else ''} "
+        f"(now has **{new_total}**).",
+        ephemeral=True,
+    )
+
+
 @tree.command(name="removeskin", description="(Mods/Admins only) Remove a skin from a user's collection")
 @app_commands.describe(user="Whose collection to remove from", skin="The skin to remove")
 @app_commands.autocomplete(skin=_member_collection_autocomplete)
@@ -721,30 +756,6 @@ async def removeallcollection_cmd(interaction: discord.Interaction, user: discor
     await interaction.response.send_message(
         f"🗑️ Wiped {user.display_name}'s entire skin collection.", ephemeral=True
     )
-
-
-async def _custom_skin_autocomplete(interaction: discord.Interaction, current: str):
-    names = [item["name"] for item in gacha.load_custom_skins_raw()]
-    matches = [n for n in names if current.lower() in n.lower()][:25]
-    return [app_commands.Choice(name=n, value=n) for n in matches]
-
-
-@tree.command(name="deleteskin", description="(Mods/Admins only) Delete a custom skin from the pool")
-@app_commands.describe(skin="The custom skin to delete")
-@app_commands.autocomplete(skin=_custom_skin_autocomplete)
-async def deleteskin_cmd(interaction: discord.Interaction, skin: str):
-    if not _is_mod_or_admin(interaction):
-        await interaction.response.send_message("Only mods or admins can do that.", ephemeral=True)
-        return
-
-    custom_skins = gacha.load_custom_skins_raw()
-    remaining = [s for s in custom_skins if s["name"].lower() != skin.lower()]
-    if len(remaining) == len(custom_skins):
-        await interaction.response.send_message(f"No custom skin named \"{skin}\" found.", ephemeral=True)
-        return
-
-    gacha.save_custom_skins_raw(remaining)
-    await interaction.response.send_message(f"🗑️ Deleted custom skin **{skin}** from the pool.", ephemeral=True)
 
 
 @tree.command(name="startcount", description="(Mods/Admins only) Set the channel for the counting game")
@@ -869,9 +880,9 @@ HELP_COMMANDS = [
     ("/stopshop", "Remove the channel restriction on shop commands", _is_mod_or_admin),
     ("/stoproll", "Remove the channel restriction on roll commands", _is_mod_or_admin),
     ("/nr", "Set a user's odds of a specific skin over their next N rolls", _is_mod_or_admin),
+    ("/setnextroll", "Guarantee a user's next roll is a specific skin", _is_mod_or_admin),
+    ("/giverolls", "Give a user extra roll charges", _is_mod_or_admin),
     ("/instantban", "Instantly ban a user id if/when they join", _is_mod_or_admin),
-    ("/addskin", "Add a custom skin to the roll pool", _is_mod_or_admin),
-    ("/deleteskin", "Delete a custom skin from the pool", _is_mod_or_admin),
     ("/give", "Give a user a specific skin directly", _is_mod_or_admin),
     ("/removeskin", "Remove one skin from a user's collection", _is_mod_or_admin),
     ("/removeallcollection", "Wipe a user's entire collection", _is_mod_or_admin),
