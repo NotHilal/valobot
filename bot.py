@@ -343,7 +343,7 @@ async def roll_cmd(interaction: discord.Interaction):
         color=gacha.RARITY_COLORS.get(item["rarity"], discord.Color.gold()),
     )
     embed.set_author(name=item["rarity"], icon_url=item.get("tier_icon"))
-    embed.set_image(url=item["icon"])
+    embed.set_thumbnail(url=item["icon"])
     await interaction.followup.send(embed=embed)
 
 
@@ -403,30 +403,36 @@ class CollectionView(discord.ui.View):
                 pass
 
 
-@tree.command(name="collection", description="Browse your Valorant skin collection")
-async def collection_cmd(interaction: discord.Interaction):
+@tree.command(name="collection", description="Browse your Valorant skin collection (or someone else's)")
+@app_commands.describe(user="(optional) whose collection to view - defaults to yours")
+async def collection_cmd(interaction: discord.Interaction, user: discord.Member | None = None):
     if not await _check_channel_lock(interaction, "roll"):
         return
     if interaction.guild is None:
         return
 
+    target = user or interaction.user
+    is_self = target.id == interaction.user.id
+
     async with storage.collection_lock:
-        collection = storage.get_collection(interaction.guild.id, interaction.user.id)
+        collection = storage.get_collection(interaction.guild.id, target.id)
         gacha.sync_roll_charges(collection)
-        storage.save_collection(interaction.guild.id, interaction.user.id, collection)
+        storage.save_collection(interaction.guild.id, target.id, collection)
 
     charges_line = f"🔋 Roll charges: **{collection['charges']}/{gacha.MAX_ROLL_CHARGES}**"
 
     items = collection.get("items", [])
     if not items:
+        empty_line = "You haven't" if is_self else f"{target.display_name} hasn't"
         await interaction.response.send_message(
-            f"You haven't rolled any skins yet. Try `/rollskin`!\n{charges_line}", ephemeral=True
+            f"{empty_line} rolled any skins yet. Try `/rollskin`!\n{charges_line}", ephemeral=True
         )
         return
 
     counts_line = " · ".join(f"{count} {rarity}" for rarity, count in gacha.rarity_counts(items))
+    possessive = "Your" if is_self else f"{target.display_name}'s"
     header = (
-        f"🏆 **{interaction.user.display_name}'s Collection** — {len(items)} total\n"
+        f"🏆 **{possessive} Collection** — {len(items)} total\n"
         f"{counts_line}\n"
         f"{charges_line}"
     )
@@ -602,7 +608,7 @@ async def showoff_cmd(
     for item in items:
         color = gacha.RARITY_COLORS.get(item["rarity"], discord.Color.purple())
         embed = discord.Embed(title=item["name"], description=f"Rarity: **{item['rarity']}**", color=color)
-        embed.set_image(url=item["icon"])
+        embed.set_thumbnail(url=item["icon"])
         embeds.append(embed)
 
     await interaction.response.send_message(
@@ -1010,7 +1016,7 @@ HELP_COMMANDS = [
     ("/nightmarket", "Show your Night Market bonus offers, if the event is running", None),
     ("/logout", "logout your account", None),
     ("/rollskin", "Roll for a random skin or agent (2 charges, +1 at Paris midnight/noon)", None),
-    ("/collection", "Browse your full skin collection and charges", None),
+    ("/collection", "Browse your (or someone else's) full skin collection and charges", None),
     ("/showoff", "Publicly show off 1-3 skins from your collection", None),
     ("/trade", "Propose a skin trade (sent via DM to the other person)", None),
     ("/helpme", "Show this list", None),

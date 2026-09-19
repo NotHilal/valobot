@@ -22,10 +22,10 @@ ICON_OVERRIDES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "
 RARITY_TIERS = ["Select", "Deluxe", "Premium", "Exclusive", "Ultra"]
 
 # Agents are a separate category from skin rarities (not selectable for custom
-# skins), but they're folded into the same weighted roll and slot into the
-# rarity ranking between Exclusive and Ultra to reflect their drop odds.
+# skins), but they're folded into the same weighted roll. Ranked as the
+# rarest tier of all, above Ultra.
 AGENT_CATEGORY = "Agent"
-_DISPLAY_RARITY_ORDER = ["Select", "Deluxe", "Premium", "Exclusive", AGENT_CATEGORY, "Ultra"]
+_DISPLAY_RARITY_ORDER = ["Select", "Deluxe", "Premium", "Exclusive", "Ultra", AGENT_CATEGORY]
 RARITY_RANK = {name: i for i, name in enumerate(_DISPLAY_RARITY_ORDER)}
 # Weights double as exact percentages (they sum to 100).
 RARITY_WEIGHTS = {"Select": 36, "Deluxe": 25, "Premium": 17, "Exclusive": 8, AGENT_CATEGORY: 6, "Ultra": 8}
