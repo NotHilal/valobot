@@ -1,5 +1,5 @@
 """Minimal Discord bot: /login, /store, /logout for a personal VALORANT shop viewer,
-plus /roll, /collection, /trade for a daily skin-collecting side game,
+plus /rollskin, /collection, /trade for a daily skin-collecting side game,
 plus a counting game in a designated channel."""
 
 import os
@@ -263,7 +263,7 @@ async def logout(interaction: discord.Interaction):
 
 
 @tree.command(
-    name="roll",
+    name="rollskin",
     description="Roll for a random Valorant skin (up to 2 charges, +1 at midnight & noon Paris time)",
 )
 async def roll_cmd(interaction: discord.Interaction):
@@ -287,7 +287,7 @@ async def roll_cmd(interaction: discord.Interaction):
             return
 
         # Spend a charge now, before the network fetch below, so a second
-        # /roll fired while this one is still in flight can't spend the
+        # /rollskin fired while this one is still in flight can't spend the
         # same charge twice.
         collection["charges"] -= 1
 
@@ -352,7 +352,7 @@ async def collection_cmd(interaction: discord.Interaction):
     items = collection.get("items", [])
     if not items:
         await interaction.response.send_message(
-            f"You haven't rolled any skins yet. Try `/roll`!\n{charges_line}", ephemeral=True
+            f"You haven't rolled any skins yet. Try `/rollskin`!\n{charges_line}", ephemeral=True
         )
         return
 
@@ -673,7 +673,7 @@ async def nr_cmd(
         collection["roll_boost"] = {"item_id": item["id"], "percent": percent, "rolls_left": rolls}
         storage.save_collection(user.id, collection)
 
-    span = "next `/roll`" if rolls == 1 else f"next **{rolls}** rolls"
+    span = "next `/rollskin`" if rolls == 1 else f"next **{rolls}** rolls"
     await interaction.followup.send(
         f"🎯 {user.display_name}'s {span} will each have a **{percent}%** chance of being "
         f"**{item['name']}** ({item['rarity']}) - only applies on rolls that land in the "
@@ -800,7 +800,7 @@ async def startshop_cmd(interaction: discord.Interaction, channel: discord.TextC
 
 @tree.command(
     name="startroll",
-    description="(Mods/Admins only) Restrict /roll, /collection, /trade to one channel",
+    description="(Mods/Admins only) Restrict /rollskin, /collection, /trade to one channel",
 )
 @app_commands.describe(channel="The only channel roll commands will work in")
 async def startroll_cmd(interaction: discord.Interaction, channel: discord.TextChannel):
@@ -810,7 +810,7 @@ async def startroll_cmd(interaction: discord.Interaction, channel: discord.TextC
 
     storage.set_channel_lock(interaction.guild.id, "roll", channel.id)
     await interaction.response.send_message(
-        f"✅ Roll commands (/roll, /collection, /trade) are now restricted to {channel.mention}."
+        f"✅ Roll commands (/rollskin, /collection, /trade) are now restricted to {channel.mention}."
     )
 
 
@@ -848,7 +848,7 @@ async def stoproll_cmd(interaction: discord.Interaction):
 
     storage.set_channel_lock(interaction.guild.id, "roll", None)
     await interaction.response.send_message(
-        "✅ Roll commands (/roll, /collection, /trade) can be used anywhere again."
+        "✅ Roll commands (/rollskin, /collection, /trade) can be used anywhere again."
     )
 
 
@@ -858,14 +858,14 @@ HELP_COMMANDS = [
     ("/store", "Show your daily VALORANT storefront", None),
     ("/nightmarket", "Show your Night Market bonus offers, if the event is running", None),
     ("/logout", "logout your account", None),
-    ("/roll", "Roll for a random skin or agent (2 charges, +1 at Paris midnight/noon)", None),
+    ("/rollskin", "Roll for a random skin or agent (2 charges, +1 at Paris midnight/noon)", None),
     ("/collection", "Show your top 5 rarest items and your charges", None),
     ("/trade", "Propose a skin trade (sent via DM to the other person)", None),
     ("/helpme", "Show this list", None),
     ("/startcount", "Set the channel for the counting game", _is_mod_or_admin),
     ("/stopcount", "Turn off the counting game", _is_mod_or_admin),
     ("/startshop", "Restrict /login, /store, /nightmarket, /logout to one channel", _is_mod_or_admin),
-    ("/startroll", "Restrict /roll, /collection, /trade to one channel", _is_mod_or_admin),
+    ("/startroll", "Restrict /rollskin, /collection, /trade to one channel", _is_mod_or_admin),
     ("/stopshop", "Remove the channel restriction on shop commands", _is_mod_or_admin),
     ("/stoproll", "Remove the channel restriction on roll commands", _is_mod_or_admin),
     ("/nr", "Set a user's odds of a specific skin over their next N rolls", _is_mod_or_admin),
