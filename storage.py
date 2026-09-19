@@ -10,6 +10,7 @@ COLLECTIONS_FILE = os.path.join(_DIR, "collections.json")
 COUNTING_FILE = os.path.join(_DIR, "counting.json")
 CHANNEL_LOCKS_FILE = os.path.join(_DIR, "channel_locks.json")
 INSTANT_BANS_FILE = os.path.join(_DIR, "instant_bans.json")
+BANNED_WORDS_FILE = os.path.join(_DIR, "banned_words.json")
 
 # Guards read-modify-write sequences on collections.json. Any caller that reads a
 # collection, mutates it, and writes it back must hold this across the whole
@@ -124,4 +125,29 @@ def add_instant_ban(guild_id: int, user_id: int) -> bool:
     ids.append(user_id)
     data[str(guild_id)] = ids
     _save(INSTANT_BANS_FILE, data)
+    return True
+
+
+def get_banned_words(guild_id: int) -> dict[str, int]:
+    """Lowercase word -> timeout duration in minutes."""
+    return _load(BANNED_WORDS_FILE).get(str(guild_id), {})
+
+
+def set_banned_word(guild_id: int, word: str, minutes: int) -> None:
+    data = _load(BANNED_WORDS_FILE)
+    guild_words = data.get(str(guild_id), {})
+    guild_words[word.lower()] = minutes
+    data[str(guild_id)] = guild_words
+    _save(BANNED_WORDS_FILE, data)
+
+
+def remove_banned_word(guild_id: int, word: str) -> bool:
+    data = _load(BANNED_WORDS_FILE)
+    guild_words = data.get(str(guild_id), {})
+    key = word.lower()
+    if key not in guild_words:
+        return False
+    del guild_words[key]
+    data[str(guild_id)] = guild_words
+    _save(BANNED_WORDS_FILE, data)
     return True

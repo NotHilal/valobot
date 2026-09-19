@@ -3,6 +3,8 @@ plus /rollskin, /collection, /trade for a daily skin-collecting side game,
 plus a counting game in a designated channel."""
 
 import os
+import re
+from datetime import timedelta
 
 import aiohttp
 import discord
@@ -1042,6 +1044,8 @@ HELP_COMMANDS = [
     ("/setnextroll", "Guarantee a user's next roll is a specific skin", _is_mod_or_admin),
     ("/giverolls", "Give a user extra roll charges", _is_mod_or_admin),
     ("/instantban", "Instantly ban a user id if/when they join", _is_mod_or_admin),
+    ("/banword", "Time out anyone who types a specific word", _is_mod_or_admin),
+    ("/unbanword", "Remove a word from the banned-word list", _is_mod_or_admin),
     ("/give", "Give a user a specific skin directly", _is_mod_or_admin),
     ("/removeskin", "Remove one skin from a user's collection", _is_mod_or_admin),
     ("/removeallcollection", "Wipe a user's entire collection", _is_mod_or_admin),
@@ -1059,10 +1063,15 @@ async def helpme_cmd(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-@tree.command(name="instantban", description="(Mods/Admins only) Instantly ban this user id if/when they join")
+@tree.command(name="instantban", description="(Mods/Admins only) Instantly ban this user if/when they join")
 @app_commands.default_permissions(administrator=True)
-@app_commands.describe(id="The Discord user id to ban on sight")
-async def instantban_cmd(interaction: discord.Interaction, id: str):
+@app_commands.describe(
+    user="Pick a current server member (start typing their name/tag)",
+    id="Or a raw Discord user id - needed to ban someone who hasn't joined yet",
+)
+async def instantban_cmd(
+    interaction: discord.Interaction, user: discord.Member | None = None, id: str | None = None
+):
     if not _is_mod_or_admin(interaction):
         await interaction.response.send_message("Only mods or admins can do that.", ephemeral=True)
         return
@@ -1070,10 +1079,19 @@ async def instantban_cmd(interaction: discord.Interaction, id: str):
     if interaction.guild is None:
         return
 
-    if not id.isdigit():
-        await interaction.response.send_message("That doesn't look like a valid user id.", ephemeral=True)
+    if user is not None:
+        user_id = user.id
+    elif id is not None:
+        if not id.isdigit():
+            await interaction.response.send_message("That doesn't look like a valid user id.", ephemeral=True)
+            return
+        user_id = int(id)
+    else:
+        await interaction.response.send_message(
+            "Pick a server member with `user`, or give a raw `id` for someone not in the server yet.",
+            ephemeral=True,
+        )
         return
-    user_id = int(id)
 
     added = storage.add_instant_ban(interaction.guild.id, user_id)
     if not added:
@@ -1081,7 +1099,7 @@ async def instantban_cmd(interaction: discord.Interaction, id: str):
         return
 
     # Ban immediately if they're already in the server, not just future joins.
-    member = interaction.guild.get_member(user_id)
+    member = user or interaction.guild.get_member(user_id)
     if member is not None:
         try:
             await interaction.guild.ban(member, reason="Added to the instant-ban list")
@@ -1092,6 +1110,73 @@ async def instantban_cmd(interaction: discord.Interaction, id: str):
         f"🔨 `{user_id}` will now be instantly banned if they join (or were just banned, if already here).",
         ephemeral=True,
     )
+
+
+DEFAULT_BANWORD_MINUTES = 5
+MAX_BANWORD_MINUTES = 40320  # Discord's own cap: 28 days
+
+
+@tree.command(name="banword", description="(Mods/Admins only) Time out anyone who types this word")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(word="The word (or short phrase) to ban", minutes="Timeout duration in minutes")
+async def banword_cmd(
+    interaction: discord.Interaction,
+    word: str,
+    minutes: app_commands.Range[int, 1, MAX_BANWORD_MINUTES] = DEFAULT_BANWORD_MINUTES,
+):
+    if not _is_mod_or_admin(interaction):
+        await interaction.response.send_message("Only mods or admins can do that.", ephemeral=True)
+        return
+    if interaction.guild is None:
+        return
+
+    storage.set_banned_word(interaction.guild.id, word, minutes)
+    await interaction.response.send_message(
+        f"🚫 Anyone who types \"{word}\" now gets timed out for {minutes} minute{'s' if minutes != 1 else ''}.",
+        ephemeral=True,
+    )
+
+
+@tree.command(name="unbanword", description="(Mods/Admins only) Remove a word from the banned-word list")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(word="The banned word to remove")
+async def unbanword_cmd(interaction: discord.Interaction, word: str):
+    if not _is_mod_or_admin(interaction):
+        await interaction.response.send_message("Only mods or admins can do that.", ephemeral=True)
+        return
+    if interaction.guild is None:
+        return
+
+    removed = storage.remove_banned_word(interaction.guild.id, word)
+    if not removed:
+        await interaction.response.send_message(f"\"{word}\" isn't on the banned-word list.", ephemeral=True)
+        return
+    await interaction.response.send_message(f"✅ \"{word}\" is no longer banned.", ephemeral=True)
+
+
+async def _check_banned_words(message: discord.Message) -> bool:
+    """Times out the author if their message contains a banned word. Returns
+    True if a timeout was applied (whole-word/phrase match, case-insensitive)."""
+    banned = storage.get_banned_words(message.guild.id)
+    if not banned:
+        return False
+
+    for word, minutes in banned.items():
+        if re.search(rf"\b{re.escape(word)}\b", message.content, re.IGNORECASE):
+            try:
+                await message.author.timeout(timedelta(minutes=minutes), reason=f"Used banned word: {word}")
+            except discord.HTTPException as exc:
+                print(f"banword timeout failed for {message.author.id} in guild {message.guild.id}: {exc!r}")
+                return False
+            try:
+                await message.channel.send(
+                    f"🔇 {message.author.mention} got timed out for {minutes} minute"
+                    f"{'s' if minutes != 1 else ''} (banned word)."
+                )
+            except discord.HTTPException:
+                pass
+            return True
+    return False
 
 
 @client.event
@@ -1106,6 +1191,9 @@ async def on_member_join(member: discord.Member):
 @client.event
 async def on_message(message: discord.Message):
     if message.author.bot or message.guild is None:
+        return
+
+    if await _check_banned_words(message):
         return
 
     state = storage.get_counting_state(message.guild.id)
