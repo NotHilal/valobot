@@ -13,6 +13,7 @@ INSTANT_BANS_FILE = os.path.join(_DIR, "instant_bans.json")
 BANNED_WORDS_FILE = os.path.join(_DIR, "banned_words.json")
 DELETED_MESSAGES_FILE = os.path.join(_DIR, "deleted_messages.json")
 DELETED_MEDIA_DIR = os.path.join(_DIR, "deleted_media")
+LOG_CHANNELS_FILE = os.path.join(_DIR, "log_channels.json")
 
 # Guards read-modify-write sequences on collections.json. Any caller that reads a
 # collection, mutates it, and writes it back must hold this across the whole
@@ -177,3 +178,14 @@ def save_deleted_media(guild_id: int, name: str, data: bytes) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "wb") as f:
         f.write(data)
+
+
+def get_log_channel(guild_id: int) -> int | None:
+    """The channel deleted messages get posted in, or None if logging is off."""
+    return _load(LOG_CHANNELS_FILE).get(str(guild_id))
+
+
+def set_log_channel(guild_id: int, channel_id: int | None) -> None:
+    data = _load(LOG_CHANNELS_FILE)
+    data[str(guild_id)] = channel_id
+    _save(LOG_CHANNELS_FILE, data)

@@ -9,4 +9,5 @@ instant_bans.json
 banned_words.json
 deleted_messages.json
 deleted_media/
+log_channels.json
 bot.py.bak.*

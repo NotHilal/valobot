@@ -3,6 +3,7 @@ plus /rollskin, /collection, /trade for a daily skin-collecting side game,
 plus a counting game in a designated channel."""
 
 import asyncio
+import io
 import math
 import os
 import re
@@ -1058,6 +1059,8 @@ HELP_COMMANDS = [
     ("/unbanword", "Remove a word from the banned-word list", _is_mod_or_admin),
     ("/banwords", "List all banned words", _is_mod_or_admin),
     ("/checkdeleted", "See the messages and images mods have deleted from a user", _is_mod_or_admin),
+    ("/setuplogs", "Post every deleted message in a channel", _is_mod_or_admin),
+    ("/stoplogs", "Stop posting deleted messages", _is_mod_or_admin),
     ("/give", "Give a user a specific skin directly", _is_mod_or_admin),
     ("/removeskin", "Remove one skin from a user's collection", _is_mod_or_admin),
     ("/removeallcollection", "Wipe a user's entire collection", _is_mod_or_admin),
@@ -1251,6 +1254,27 @@ async def _read_attachments(message: discord.Message) -> list[tuple[discord.Atta
     return result
 
 
+def _upload_name(message: discord.Message, index: int, filename: str) -> str:
+    """A safe, unique file name for re-uploading/saving an attachment."""
+    ext = os.path.splitext(filename)[1].lower()
+    if not re.fullmatch(r"\.[a-z0-9]{1,8}", ext):
+        ext = ""
+    return f"{message.id}_{index}{ext}"
+
+
+def _deletion_entry(message: discord.Message, deleted_by: int | None, self_deleted: bool) -> dict:
+    return {
+        "message_id": message.id,
+        "author_id": message.author.id,
+        "channel_id": message.channel.id,
+        "content": message.content,
+        "sent_at": message.created_at.isoformat(),
+        "deleted_at": discord.utils.utcnow().isoformat(),
+        "deleted_by": deleted_by,
+        "self_deleted": self_deleted,
+    }
+
+
 def _log_deleted_message(
     message: discord.Message,
     deleted_by: int | None,
@@ -1260,22 +1284,13 @@ def _log_deleted_message(
     for i, (attachment, data) in enumerate(attachments):
         file = None
         if data is not None:
-            ext = os.path.splitext(attachment.filename)[1].lower()
-            if not re.fullmatch(r"\.[a-z0-9]{1,8}", ext):
-                ext = ""
-            file = f"{message.id}_{i}{ext}"
+            file = _upload_name(message, i, attachment.filename)
             storage.save_deleted_media(message.guild.id, file, data)
         saved.append({"filename": attachment.filename, "file": file})
 
-    storage.add_deleted_message(message.guild.id, message.author.id, {
-        "message_id": message.id,
-        "channel_id": message.channel.id,
-        "content": message.content,
-        "sent_at": message.created_at.isoformat(),
-        "deleted_at": discord.utils.utcnow().isoformat(),
-        "deleted_by": deleted_by,
-        "attachments": saved,
-    })
+    entry = _deletion_entry(message, deleted_by, self_deleted=False)
+    entry["attachments"] = saved
+    storage.add_deleted_message(message.guild.id, message.author.id, entry)
 
 
 async def _prime_audit_counts() -> None:
@@ -1284,7 +1299,7 @@ async def _prime_audit_counts() -> None:
     async with _audit_lock:
         for guild in client.guilds:
             if not guild.me.guild_permissions.view_audit_log:
-                print(f"No View Audit Log permission in {guild.name} - deleted-message logging is off there")
+                print(f"No View Audit Log permission in {guild.name} - can't tell who deletes messages there")
                 continue
             try:
                 async for entry in guild.audit_logs(limit=100, action=discord.AuditLogAction.message_delete):
@@ -1293,8 +1308,9 @@ async def _prime_audit_counts() -> None:
                 print(f"couldn't read audit log for guild {guild.id}: {exc!r}")
 
 
-async def _find_message_deleter(guild: discord.Guild, author_id: int, channel_id: int) -> int | None:
-    """Id of the mod who deleted this user's message, or None if they deleted it themselves."""
+async def _find_message_deleter(guild: discord.Guild, author_id: int, channel_id: int) -> tuple[int | None, bool]:
+    """(id of the mod who deleted this user's message, whether the audit log
+    could be read). A None id with a readable audit log means a self-delete."""
     for delay in AUDIT_LOG_RETRY_DELAYS:
         await asyncio.sleep(delay)
         async with _audit_lock:
@@ -1311,12 +1327,39 @@ async def _find_message_deleter(guild: discord.Guild, author_id: int, channel_id
                         consumed = 0 if (now - entry.created_at).total_seconds() < AUDIT_FRESH_SECONDS else count
                     if consumed < count:
                         _audit_consumed[entry.id] = consumed + 1
-                        return entry.user_id
+                        return entry.user_id, True
                     _audit_consumed[entry.id] = consumed
             except discord.HTTPException as exc:
                 print(f"audit log lookup failed in guild {guild.id}: {exc!r}")
-                return None
-    return None
+                return None, False
+    return None, True
+
+
+def _log_channel(guild: discord.Guild) -> discord.TextChannel | None:
+    channel_id = storage.get_log_channel(guild.id)
+    return guild.get_channel(channel_id) if channel_id else None
+
+
+async def _post_deletion_log(
+    channel: discord.TextChannel,
+    message: discord.Message,
+    entry: dict,
+    attachments: list[tuple[discord.Attachment, bytes | None]],
+) -> None:
+    sources = [
+        (a.filename, _upload_name(message, i, a.filename) if data is not None else None, data)
+        for i, (a, data) in enumerate(attachments)
+    ]
+    card, files, _, _ = _deleted_entry_card(
+        channel.guild, entry, sources, 10, channel.guild.filesize_limit, 40,
+        title="-# 🗑️ MESSAGE DELETED", max_content=3000,
+    )
+    view = discord.ui.LayoutView()
+    view.add_item(card)
+    try:
+        await channel.send(view=view, files=files, allowed_mentions=discord.AllowedMentions.none())
+    except discord.HTTPException as exc:
+        print(f"couldn't post to the log channel in guild {channel.guild.id}: {exc!r}")
 
 
 @client.event
@@ -1324,18 +1367,45 @@ async def on_message_delete(message: discord.Message):
     if message.guild is None or message.author.bot:
         return
     attachments = await _read_attachments(message)
-    deleted_by = await _find_message_deleter(message.guild, message.author.id, message.channel.id)
+    deleted_by, audit_ok = await _find_message_deleter(message.guild, message.author.id, message.channel.id)
     if deleted_by is not None:
         _log_deleted_message(message, deleted_by, attachments)
-        print(f"logged message {message.id} by {message.author} - deleted by mod {deleted_by}")
-    else:
-        print(f"message {message.id} by {message.author} deleted - no audit entry, treated as a self-delete")
+
+    log_channel = _log_channel(message.guild)
+    if log_channel is not None:
+        entry = _deletion_entry(message, deleted_by, self_deleted=deleted_by is None and audit_ok)
+        await _post_deletion_log(log_channel, message, entry, attachments)
 
 
 @client.event
 async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
-    if payload.guild_id is not None and payload.cached_message is None:
-        print(f"message {payload.message_id} deleted but wasn't cached (sent before the bot started?) - can't log it")
+    # Deletions of messages the bot never saw (sent before it last started) -
+    # all we know is where it was, not what it said or who wrote it.
+    if payload.guild_id is None or payload.cached_message is not None:
+        return
+    guild = client.get_guild(payload.guild_id)
+    log_channel = _log_channel(guild) if guild else None
+    if log_channel is None or payload.channel_id == log_channel.id:
+        return
+    card = discord.ui.Container(accent_colour=discord.Colour.dark_grey())
+    card.add_item(discord.ui.TextDisplay(
+        "-# 🗑️ MESSAGE DELETED\n"
+        "*Content unavailable - it was sent before the bot last started.*"
+    ))
+    card.add_item(discord.ui.Separator(visible=False, spacing=discord.SeparatorSpacing.large))
+    card.add_item(discord.ui.TextDisplay(
+        f"**Sent in channel:** <#{payload.channel_id}>\n"
+        f"**Date:** <t:{int(discord.utils.utcnow().timestamp())}:f>"
+    ))
+    view = discord.ui.LayoutView()
+    view.add_item(card)
+    try:
+        await log_channel.send(view=view)
+    except discord.HTTPException as exc:
+        print(f"couldn't post to the log channel in guild {guild.id}: {exc!r}")
+
+
+MAX_BULK_LOG_POSTS = 25
 
 
 @client.event
@@ -1362,26 +1432,78 @@ async def on_bulk_message_delete(messages: list[discord.Message]):
     for m in messages:
         _log_deleted_message(m, deleted_by, attachments[m.id])
 
+    log_channel = _log_channel(guild)
+    if log_channel is None:
+        return
+    for m in messages[:MAX_BULK_LOG_POSTS]:
+        await _post_deletion_log(log_channel, m, _deletion_entry(m, deleted_by, self_deleted=False), attachments[m.id])
+    if len(messages) > MAX_BULK_LOG_POSTS:
+        try:
+            await log_channel.send(
+                f"…and {len(messages) - MAX_BULK_LOG_POSTS} more messages purged in {channel.mention}. "
+                "Use `/checkdeleted` on a user to see all of theirs."
+            )
+        except discord.HTTPException:
+            pass
+
+
+def _stored_attachments(guild: discord.Guild, entry: dict) -> list[tuple[str, str | None, str | None]]:
+    """A saved entry's attachments as (filename, upload name, file path) sources."""
+    sources = []
+    for attachment in entry["attachments"]:
+        path = storage.deleted_media_path(guild.id, attachment["file"]) if attachment["file"] else None
+        if path is not None and os.path.exists(path):
+            sources.append((attachment["filename"], attachment["file"], path))
+        else:
+            sources.append((attachment["filename"], None, None))
+    return sources
+
+
+EMPHASIZE_MAX_LINES = 15
+
+
+def _emphasize(content: str, max_length: int) -> str:
+    """Makes the deleted text the first thing you see: big heading text when
+    it's short, a bold quote block when it's longer."""
+    if not content.strip():
+        return "*(no text)*"
+    if len(content) > max_length:
+        content = content[:max_length] + "…"
+    lines = [line.strip() for line in content.split("\n")]
+    if len(lines) > EMPHASIZE_MAX_LINES:
+        lines = lines[:EMPHASIZE_MAX_LINES] + ["…"]
+    if len(content) <= 200 and len(lines) <= 3:
+        return "\n".join(f"## {line}" if line else "" for line in lines)
+    return "\n".join(f"> **{line}**" if line else ">" for line in lines)
+
 
 def _deleted_entry_card(
-    guild: discord.Guild, entry: dict, room_for_files: int, byte_budget: int, component_budget: int
+    guild: discord.Guild,
+    entry: dict,
+    attachments: list[tuple[str, str | None, str | bytes | None]],
+    room_for_files: int,
+    byte_budget: int,
+    component_budget: int,
+    title: str | None = None,
+    max_content: int = 350,  # 5 cards per /checkdeleted page must fit Discord's 4000-character limit
 ) -> tuple[discord.ui.Container, list[discord.File], int, int]:
-    """One logged deletion as a card: the message, its images under it, a gap,
-    then where/who/when. Attachments that don't fit the remaining budgets of the
-    page are listed by name instead. Returns (card, files, file bytes, component count)."""
+    """One deletion as a card: the message, its images under it, a gap, then
+    who/where/when. `attachments` are (filename, upload name, file path or raw
+    bytes - None if it couldn't be saved). Attachments that don't fit the
+    remaining budgets are listed by name instead. Returns (card, files, file
+    bytes, component count)."""
     components = 4  # card, message text, spacer, details text
     files, total_bytes, image_urls, other_urls, notes = [], 0, [], [], []
-    for attachment in entry["attachments"]:
-        name = attachment["filename"][:40]
-        path = storage.deleted_media_path(guild.id, attachment["file"]) if attachment["file"] else None
-        if path is None or not os.path.exists(path):
+    for filename, upload_name, source in attachments:
+        name = filename[:40]
+        if source is None:
             notes.append(f"-# 📎 {name} (couldn't be saved)")
             continue
-        size = os.path.getsize(path)
+        size = len(source) if isinstance(source, bytes) else os.path.getsize(source)
         if size > guild.filesize_limit:
             notes.append(f"-# 📎 {name} (too big to re-upload)")
             continue
-        is_image = os.path.splitext(attachment["file"])[1] in IMAGE_EXTENSIONS
+        is_image = os.path.splitext(upload_name)[1] in IMAGE_EXTENSIONS
         extra_components = 0 if is_image and image_urls else 1  # images share one gallery
         if (
             len(files) >= room_for_files
@@ -1390,21 +1512,33 @@ def _deleted_entry_card(
         ):
             notes.append(f"-# 📎 {name} (didn't fit on this page)")
             continue
-        files.append(discord.File(path, filename=attachment["file"]))
+        files.append(discord.File(io.BytesIO(source) if isinstance(source, bytes) else source, filename=upload_name))
         total_bytes += size
         components += extra_components
-        (image_urls if is_image else other_urls).append(f"attachment://{attachment['file']}")
+        (image_urls if is_image else other_urls).append(f"attachment://{upload_name}")
     if len(notes) > 3:
         notes = [f"-# 📎 {len(notes)} attachments couldn't be shown"]
 
-    content = entry["content"]
-    if len(content) > 450:  # 5 cards per page must fit Discord's 4000-character message limit
-        content = content[:450] + "…"
+    content = _emphasize(entry["content"], max_content)
     deleted_at = int(datetime.fromisoformat(entry["deleted_at"]).timestamp())
-    deleted_by = f"<@{entry['deleted_by']}>" if entry["deleted_by"] else "unknown"
+    if entry["deleted_by"]:
+        deleted_by = f"<@{entry['deleted_by']}>"
+    elif entry.get("self_deleted"):
+        deleted_by = "themselves"
+    else:
+        deleted_by = "unknown"
+
+    details = []
+    if title is not None and entry.get("author_id"):
+        details.append(f"**Author:** <@{entry['author_id']}>")
+    details += [
+        f"**Sent in channel:** <#{entry['channel_id']}>",
+        f"**Deleted by:** {deleted_by}",
+        f"**Date:** <t:{deleted_at}:f>",
+    ]
 
     card = discord.ui.Container(accent_colour=discord.Colour.red())
-    card.add_item(discord.ui.TextDisplay("\n".join([content or "*(no text)*", *notes])))
+    card.add_item(discord.ui.TextDisplay("\n".join([*([title] if title else []), content, *notes])))
     if image_urls:
         gallery = discord.ui.MediaGallery()
         for url in image_urls:
@@ -1413,12 +1547,48 @@ def _deleted_entry_card(
     for url in other_urls:
         card.add_item(discord.ui.File(url))
     card.add_item(discord.ui.Separator(visible=False, spacing=discord.SeparatorSpacing.large))
-    card.add_item(discord.ui.TextDisplay(
-        f"**Sent in channel:** <#{entry['channel_id']}>\n"
-        f"**Deleted by:** {deleted_by}\n"
-        f"**Date:** <t:{deleted_at}:f>"
-    ))
+    card.add_item(discord.ui.TextDisplay("\n".join(details)))
     return card, files, total_bytes, components
+
+
+@tree.command(name="setuplogs", description="(Mods/Admins only) Post every deleted message in this channel")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(channel="The channel deleted messages get posted in")
+async def setuplogs_cmd(interaction: discord.Interaction, channel: discord.TextChannel):
+    if not _is_mod_or_admin(interaction):
+        await interaction.response.send_message("Only mods or admins can do that.", ephemeral=True)
+        return
+    if interaction.guild is None:
+        return
+
+    perms = channel.permissions_for(interaction.guild.me)
+    if not (perms.view_channel and perms.send_messages and perms.attach_files):
+        await interaction.response.send_message(
+            f"I need **View Channel**, **Send Messages** and **Attach Files** in {channel.mention} first.",
+            ephemeral=True,
+        )
+        return
+
+    storage.set_log_channel(interaction.guild.id, channel.id)
+    note = ""
+    if not interaction.guild.me.guild_permissions.view_audit_log:
+        note = "\n⚠️ I don't have **View Audit Log**, so I can't tell who deleted each message until you give it to me."
+    await interaction.response.send_message(
+        f"🗑️ Deleted messages will now be posted in {channel.mention}.{note}", ephemeral=True
+    )
+
+
+@tree.command(name="stoplogs", description="(Mods/Admins only) Stop posting deleted messages")
+@app_commands.default_permissions(administrator=True)
+async def stoplogs_cmd(interaction: discord.Interaction):
+    if not _is_mod_or_admin(interaction):
+        await interaction.response.send_message("Only mods or admins can do that.", ephemeral=True)
+        return
+    if interaction.guild is None:
+        return
+
+    storage.set_log_channel(interaction.guild.id, None)
+    await interaction.response.send_message("✅ Deleted messages are no longer posted anywhere.", ephemeral=True)
 
 
 class DeletedLogView(discord.ui.LayoutView):
@@ -1459,6 +1629,7 @@ class DeletedLogView(discord.ui.LayoutView):
             card, files, size, components = _deleted_entry_card(
                 self.guild,
                 entry,
+                _stored_attachments(self.guild, entry),
                 self.MAX_FILES - len(page_files),
                 self.guild.filesize_limit - page_bytes,
                 component_budget - reserved,
