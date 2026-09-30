@@ -1371,10 +1371,14 @@ async def on_message_delete(message: discord.Message):
     if deleted_by is not None:
         _log_deleted_message(message, deleted_by, attachments)
 
+    who = f"mod {deleted_by}" if deleted_by else ("themselves" if audit_ok else "unknown (audit log unreadable)")
     log_channel = _log_channel(message.guild)
-    if log_channel is not None:
-        entry = _deletion_entry(message, deleted_by, self_deleted=deleted_by is None and audit_ok)
-        await _post_deletion_log(log_channel, message, entry, attachments)
+    if log_channel is None:
+        print(f"message {message.id} by {message.author} deleted by {who} - no log channel set, run /setuplogs")
+        return
+    entry = _deletion_entry(message, deleted_by, self_deleted=deleted_by is None and audit_ok)
+    await _post_deletion_log(log_channel, message, entry, attachments)
+    print(f"message {message.id} by {message.author} deleted by {who} - posted in #{log_channel.name}")
 
 
 @client.event
@@ -1385,6 +1389,7 @@ async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
         return
     guild = client.get_guild(payload.guild_id)
     log_channel = _log_channel(guild) if guild else None
+    print(f"message {payload.message_id} deleted but wasn't cached (sent before the bot started?)")
     if log_channel is None or payload.channel_id == log_channel.id:
         return
     card = discord.ui.Container(accent_colour=discord.Colour.dark_grey())
