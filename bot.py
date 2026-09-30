@@ -3,6 +3,7 @@ plus /rollskin, /collection, /trade for a daily skin-collecting side game,
 plus a counting game in a designated channel."""
 
 import asyncio
+import math
 import os
 import re
 from datetime import datetime, timedelta
@@ -1229,7 +1230,7 @@ _audit_lock = asyncio.Lock()
 AUDIT_LOG_RETRY_DELAYS = (1.5, 2, 4)
 AUDIT_FRESH_SECONDS = 20
 MAX_SAVED_ATTACHMENT_BYTES = 25 * 1024 * 1024
-CHECKDELETED_MAX_ENTRIES = 50
+CHECKDELETED_PAGE_SIZE = 5
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 
 
@@ -1363,43 +1364,47 @@ async def on_bulk_message_delete(messages: list[discord.Message]):
 
 
 def _deleted_entry_card(
-    guild: discord.Guild, entry: dict
-) -> tuple[discord.ui.Container, list[discord.File], int, int, int]:
+    guild: discord.Guild, entry: dict, room_for_files: int, byte_budget: int, component_budget: int
+) -> tuple[discord.ui.Container, list[discord.File], int, int]:
     """One logged deletion as a card: the message, its images under it, a gap,
-    then where/who/when. Returns (card, files, file bytes, component count, text length)."""
+    then where/who/when. Attachments that don't fit the remaining budgets of the
+    page are listed by name instead. Returns (card, files, file bytes, component count)."""
+    components = 4  # card, message text, spacer, details text
     files, total_bytes, image_urls, other_urls, notes = [], 0, [], [], []
     for attachment in entry["attachments"]:
+        name = attachment["filename"][:40]
         path = storage.deleted_media_path(guild.id, attachment["file"]) if attachment["file"] else None
         if path is None or not os.path.exists(path):
-            notes.append(f"-# 📎 {attachment['filename']} (couldn't be saved)")
+            notes.append(f"-# 📎 {name} (couldn't be saved)")
             continue
         size = os.path.getsize(path)
-        if total_bytes + size > guild.filesize_limit:
-            notes.append(f"-# 📎 {attachment['filename']} (too big to re-upload)")
+        if size > guild.filesize_limit:
+            notes.append(f"-# 📎 {name} (too big to re-upload)")
+            continue
+        is_image = os.path.splitext(attachment["file"])[1] in IMAGE_EXTENSIONS
+        extra_components = 0 if is_image and image_urls else 1  # images share one gallery
+        if (
+            len(files) >= room_for_files
+            or total_bytes + size > byte_budget
+            or components + extra_components > component_budget
+        ):
+            notes.append(f"-# 📎 {name} (didn't fit on this page)")
             continue
         files.append(discord.File(path, filename=attachment["file"]))
         total_bytes += size
-        url = f"attachment://{attachment['file']}"
-        if os.path.splitext(attachment["file"])[1] in IMAGE_EXTENSIONS:
-            image_urls.append(url)
-        else:
-            other_urls.append(url)
+        components += extra_components
+        (image_urls if is_image else other_urls).append(f"attachment://{attachment['file']}")
+    if len(notes) > 3:
+        notes = [f"-# 📎 {len(notes)} attachments couldn't be shown"]
 
     content = entry["content"]
-    if len(content) > 1000:
-        content = content[:1000] + "…"
-    text = "\n".join([content or "*(no text)*", *notes])
-
+    if len(content) > 450:  # 5 cards per page must fit Discord's 4000-character message limit
+        content = content[:450] + "…"
     deleted_at = int(datetime.fromisoformat(entry["deleted_at"]).timestamp())
     deleted_by = f"<@{entry['deleted_by']}>" if entry["deleted_by"] else "unknown"
-    details = (
-        f"**Sent in channel:** <#{entry['channel_id']}>\n"
-        f"**Deleted by:** {deleted_by}\n"
-        f"**Date:** <t:{deleted_at}:f>"
-    )
 
     card = discord.ui.Container(accent_colour=discord.Colour.red())
-    card.add_item(discord.ui.TextDisplay(text))
+    card.add_item(discord.ui.TextDisplay("\n".join([content or "*(no text)*", *notes])))
     if image_urls:
         gallery = discord.ui.MediaGallery()
         for url in image_urls:
@@ -1408,16 +1413,104 @@ def _deleted_entry_card(
     for url in other_urls:
         card.add_item(discord.ui.File(url))
     card.add_item(discord.ui.Separator(visible=False, spacing=discord.SeparatorSpacing.large))
-    card.add_item(discord.ui.TextDisplay(details))
+    card.add_item(discord.ui.TextDisplay(
+        f"**Sent in channel:** <#{entry['channel_id']}>\n"
+        f"**Deleted by:** {deleted_by}\n"
+        f"**Date:** <t:{deleted_at}:f>"
+    ))
+    return card, files, total_bytes, components
 
-    components = 4 + (1 if image_urls else 0) + len(other_urls)  # card, 2 texts, separator + media
-    return card, files, total_bytes, components, len(text) + len(details)
 
+class DeletedLogView(discord.ui.LayoutView):
+    """Public, paginated /checkdeleted result. Anyone can flip pages, with a
+    shared cooldown so people can't flip it out from under each other."""
 
-# Discord's per-message limits for the new component layout.
-MAX_COMPONENTS_PER_MESSAGE = 40
-MAX_TEXT_PER_MESSAGE = 4000
-MAX_FILES_PER_MESSAGE = 10
+    MAX_COMPONENTS = 40  # Discord's per-message limit, nested components included
+    MAX_FILES = 10
+    PAGE_COOLDOWN_SECONDS = 5
+
+    def __init__(self, guild: discord.Guild, user: discord.User, logs: list[dict]):
+        super().__init__(timeout=600)
+        self.guild = guild
+        self.user = user
+        self.entries = logs[::-1]  # newest first
+        self.last_flip: datetime | None = None
+        self.page = 0
+        self.page_count = (len(self.entries) + CHECKDELETED_PAGE_SIZE - 1) // CHECKDELETED_PAGE_SIZE
+        self.message: discord.Message | None = None
+
+    def build_page(self) -> list[discord.File]:
+        """Rebuilds the view for the current page and returns the files it needs."""
+        self.clear_items()
+        count = len(self.entries)
+        header = f"### 🗑️ {count} deleted message{'s' if count != 1 else ''} from {self.user.mention}"
+        if self.page_count > 1:
+            header += f"\n-# Page {self.page + 1}/{self.page_count}"
+        self.add_item(discord.ui.TextDisplay(header))
+
+        component_budget = self.MAX_COMPONENTS - 1 - (3 if self.page_count > 1 else 0)  # header, button row
+        page_files: list[discord.File] = []
+        page_bytes = 0
+        start = self.page * CHECKDELETED_PAGE_SIZE
+        page_entries = self.entries[start:start + CHECKDELETED_PAGE_SIZE]
+        for i, entry in enumerate(page_entries):
+            # Keep 4 components in reserve for each card still to come on this page.
+            reserved = 4 * (len(page_entries) - i - 1)
+            card, files, size, components = _deleted_entry_card(
+                self.guild,
+                entry,
+                self.MAX_FILES - len(page_files),
+                self.guild.filesize_limit - page_bytes,
+                component_budget - reserved,
+            )
+            self.add_item(card)
+            page_files.extend(files)
+            page_bytes += size
+            component_budget -= components
+
+        if self.page_count > 1:
+            prev_button = discord.ui.Button(emoji="◀️", style=discord.ButtonStyle.secondary, disabled=self.page == 0)
+            next_button = discord.ui.Button(
+                emoji="▶️", style=discord.ButtonStyle.secondary, disabled=self.page >= self.page_count - 1
+            )
+            prev_button.callback = self._previous_page
+            next_button.callback = self._next_page
+            self.add_item(discord.ui.ActionRow(prev_button, next_button))
+        return page_files
+
+    async def _show_page(self, interaction: discord.Interaction, page: int):
+        now = discord.utils.utcnow()
+        if self.last_flip is not None:
+            remaining = self.PAGE_COOLDOWN_SECONDS - (now - self.last_flip).total_seconds()
+            if remaining > 0:
+                await interaction.response.send_message(
+                    f"⏳ Slow down - you can flip the page again in {math.ceil(remaining)}s.", ephemeral=True
+                )
+                return
+        self.last_flip = now
+
+        self.page = page
+        files = self.build_page()
+        await interaction.response.edit_message(
+            view=self, attachments=files, allowed_mentions=discord.AllowedMentions.none()
+        )
+
+    async def _previous_page(self, interaction: discord.Interaction):
+        await self._show_page(interaction, max(self.page - 1, 0))
+
+    async def _next_page(self, interaction: discord.Interaction):
+        await self._show_page(interaction, min(self.page + 1, self.page_count - 1))
+
+    async def on_timeout(self):
+        if self.message is None:
+            return
+        for item in self.walk_children():
+            if isinstance(item, discord.ui.Button):
+                item.disabled = True
+        try:
+            await self.message.edit(view=self)
+        except discord.HTTPException:
+            pass
 
 
 @tree.command(name="checkdeleted", description="(Mods/Admins only) See the messages mods have deleted from a user")
@@ -1434,48 +1527,13 @@ async def checkdeleted_cmd(interaction: discord.Interaction, user: discord.User)
     if not logs:
         await interaction.response.send_message(f"No mod-deleted messages logged for {user.mention}.", ephemeral=True)
         return
-    await interaction.response.defer(ephemeral=True, thinking=True)
+    await interaction.response.defer(thinking=True)
 
-    shown = logs[-CHECKDELETED_MAX_ENTRIES:][::-1]  # newest first
-    header = f"### 🗑️ {len(logs)} deleted message{'s' if len(logs) != 1 else ''} from {user.mention}"
-    if len(shown) < len(logs):
-        header += f"\n-# Showing the latest {len(shown)}"
-    byte_limit = interaction.guild.filesize_limit
-
-    # Pack cards into as few messages as Discord's per-message limits allow.
-    view = discord.ui.LayoutView()
-    view.add_item(discord.ui.TextDisplay(header))
-    batch_files: list[discord.File] = []
-    batch_bytes, batch_components, batch_text, batch_cards = 0, 1, len(header), 0
-
-    async def flush():
-        nonlocal view, batch_files, batch_bytes, batch_components, batch_text, batch_cards
-        try:
-            await interaction.followup.send(
-                view=view, files=batch_files, ephemeral=True, allowed_mentions=discord.AllowedMentions.none()
-            )
-        except discord.HTTPException as exc:
-            print(f"checkdeleted send failed in guild {interaction.guild.id}: {exc!r}")
-            await interaction.followup.send("⚠️ Some entries couldn't be sent.", ephemeral=True)
-        view = discord.ui.LayoutView()
-        batch_files, batch_bytes, batch_components, batch_text, batch_cards = [], 0, 0, 0, 0
-
-    for entry in shown:
-        card, files, size, components, text_len = _deleted_entry_card(interaction.guild, entry)
-        if batch_cards and (
-            len(batch_files) + len(files) > MAX_FILES_PER_MESSAGE
-            or batch_bytes + size > byte_limit
-            or batch_components + components > MAX_COMPONENTS_PER_MESSAGE
-            or batch_text + text_len > MAX_TEXT_PER_MESSAGE
-        ):
-            await flush()
-        view.add_item(card)
-        batch_files.extend(files)
-        batch_bytes += size
-        batch_components += components
-        batch_text += text_len
-        batch_cards += 1
-    await flush()
+    view = DeletedLogView(interaction.guild, user, logs)
+    files = view.build_page()
+    view.message = await interaction.followup.send(
+        view=view, files=files, allowed_mentions=discord.AllowedMentions.none(), wait=True
+    )
 
 
 @client.event
