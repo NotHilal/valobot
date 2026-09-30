@@ -1362,44 +1362,62 @@ async def on_bulk_message_delete(messages: list[discord.Message]):
         _log_deleted_message(m, deleted_by, attachments[m.id])
 
 
-def _deleted_entry_embed(
-    guild: discord.Guild, entry: dict, room_for_files: int, byte_budget: int
-) -> tuple[discord.Embed, list[discord.File], int] | None:
-    """One logged deletion as (embed, files, total file bytes), or None if its
-    files don't fit in the remaining room of the message being built."""
-    content = entry["content"]
-    embed = discord.Embed(
-        description=(content[:1500] + "…" if len(content) > 1500 else content) or "*(no text)*",
-        color=discord.Color.red(),
-        timestamp=datetime.fromisoformat(entry["deleted_at"]),
-    )
-    sent_at = int(datetime.fromisoformat(entry["sent_at"]).timestamp())
-    embed.add_field(name="Channel", value=f"<#{entry['channel_id']}>")
-    embed.add_field(name="Deleted by", value=f"<@{entry['deleted_by']}>" if entry["deleted_by"] else "unknown")
-    embed.add_field(name="Sent", value=f"<t:{sent_at}:f>")
-    embed.set_footer(text="Deleted")
-
-    files, total_bytes, notes = [], 0, []
+def _deleted_entry_card(
+    guild: discord.Guild, entry: dict
+) -> tuple[discord.ui.Container, list[discord.File], int, int, int]:
+    """One logged deletion as a card: the message, its images under it, a gap,
+    then where/who/when. Returns (card, files, file bytes, component count, text length)."""
+    files, total_bytes, image_urls, other_urls, notes = [], 0, [], [], []
     for attachment in entry["attachments"]:
         path = storage.deleted_media_path(guild.id, attachment["file"]) if attachment["file"] else None
         if path is None or not os.path.exists(path):
-            notes.append(f"{attachment['filename']} (couldn't be saved)")
+            notes.append(f"-# 📎 {attachment['filename']} (couldn't be saved)")
             continue
         size = os.path.getsize(path)
-        if size > guild.filesize_limit:
-            notes.append(f"{attachment['filename']} (too big to re-upload)")
+        if total_bytes + size > guild.filesize_limit:
+            notes.append(f"-# 📎 {attachment['filename']} (too big to re-upload)")
             continue
-        if len(files) >= room_for_files or total_bytes + size > byte_budget:
-            return None
         files.append(discord.File(path, filename=attachment["file"]))
         total_bytes += size
-        if embed.image.url is None and os.path.splitext(attachment["file"])[1] in IMAGE_EXTENSIONS:
-            embed.set_image(url=f"attachment://{attachment['file']}")
+        url = f"attachment://{attachment['file']}"
+        if os.path.splitext(attachment["file"])[1] in IMAGE_EXTENSIONS:
+            image_urls.append(url)
         else:
-            notes.append(attachment["filename"])
-    if notes:
-        embed.add_field(name="Attachments", value="\n".join(notes)[:1024], inline=False)
-    return embed, files, total_bytes
+            other_urls.append(url)
+
+    content = entry["content"]
+    if len(content) > 1000:
+        content = content[:1000] + "…"
+    text = "\n".join([content or "*(no text)*", *notes])
+
+    deleted_at = int(datetime.fromisoformat(entry["deleted_at"]).timestamp())
+    deleted_by = f"<@{entry['deleted_by']}>" if entry["deleted_by"] else "unknown"
+    details = (
+        f"**Sent in channel:** <#{entry['channel_id']}>\n"
+        f"**Deleted by:** {deleted_by}\n"
+        f"**Date:** <t:{deleted_at}:f>"
+    )
+
+    card = discord.ui.Container(accent_colour=discord.Colour.red())
+    card.add_item(discord.ui.TextDisplay(text))
+    if image_urls:
+        gallery = discord.ui.MediaGallery()
+        for url in image_urls:
+            gallery.add_item(media=url)
+        card.add_item(gallery)
+    for url in other_urls:
+        card.add_item(discord.ui.File(url))
+    card.add_item(discord.ui.Separator(visible=False, spacing=discord.SeparatorSpacing.large))
+    card.add_item(discord.ui.TextDisplay(details))
+
+    components = 4 + (1 if image_urls else 0) + len(other_urls)  # card, 2 texts, separator + media
+    return card, files, total_bytes, components, len(text) + len(details)
+
+
+# Discord's per-message limits for the new component layout.
+MAX_COMPONENTS_PER_MESSAGE = 40
+MAX_TEXT_PER_MESSAGE = 4000
+MAX_FILES_PER_MESSAGE = 10
 
 
 @tree.command(name="checkdeleted", description="(Mods/Admins only) See the messages mods have deleted from a user")
@@ -1419,43 +1437,44 @@ async def checkdeleted_cmd(interaction: discord.Interaction, user: discord.User)
     await interaction.response.defer(ephemeral=True, thinking=True)
 
     shown = logs[-CHECKDELETED_MAX_ENTRIES:][::-1]  # newest first
-    header = f"🗑️ **{len(logs)}** mod-deleted message{'s' if len(logs) != 1 else ''} from {user.mention}"
+    header = f"### 🗑️ {len(logs)} deleted message{'s' if len(logs) != 1 else ''} from {user.mention}"
     if len(shown) < len(logs):
-        header += f" (showing the latest {len(shown)})"
+        header += f"\n-# Showing the latest {len(shown)}"
     byte_limit = interaction.guild.filesize_limit
 
-    # Pack entries into as few messages as Discord allows: 10 embeds, 10 files,
-    # 6000 embed characters and the upload size limit per message.
-    batch_embeds: list[discord.Embed] = []
+    # Pack cards into as few messages as Discord's per-message limits allow.
+    view = discord.ui.LayoutView()
+    view.add_item(discord.ui.TextDisplay(header))
     batch_files: list[discord.File] = []
-    batch_bytes = 0
-    sent_header = False
+    batch_bytes, batch_components, batch_text, batch_cards = 0, 1, len(header), 0
 
     async def flush():
-        nonlocal batch_embeds, batch_files, batch_bytes, sent_header
-        if not batch_embeds:
-            return
-        kwargs = {"embeds": batch_embeds, "files": batch_files, "ephemeral": True}
-        if not sent_header:
-            kwargs["content"] = header
-            sent_header = True
+        nonlocal view, batch_files, batch_bytes, batch_components, batch_text, batch_cards
         try:
-            await interaction.followup.send(**kwargs)
+            await interaction.followup.send(
+                view=view, files=batch_files, ephemeral=True, allowed_mentions=discord.AllowedMentions.none()
+            )
         except discord.HTTPException as exc:
             print(f"checkdeleted send failed in guild {interaction.guild.id}: {exc!r}")
             await interaction.followup.send("⚠️ Some entries couldn't be sent.", ephemeral=True)
-        batch_embeds, batch_files, batch_bytes = [], [], 0
+        view = discord.ui.LayoutView()
+        batch_files, batch_bytes, batch_components, batch_text, batch_cards = [], 0, 0, 0, 0
 
     for entry in shown:
-        built = _deleted_entry_embed(interaction.guild, entry, 10 - len(batch_files), byte_limit - batch_bytes)
-        too_long = built is not None and sum(len(e) for e in batch_embeds) + len(built[0]) > 5500
-        if built is None or too_long or len(batch_embeds) >= 10:
+        card, files, size, components, text_len = _deleted_entry_card(interaction.guild, entry)
+        if batch_cards and (
+            len(batch_files) + len(files) > MAX_FILES_PER_MESSAGE
+            or batch_bytes + size > byte_limit
+            or batch_components + components > MAX_COMPONENTS_PER_MESSAGE
+            or batch_text + text_len > MAX_TEXT_PER_MESSAGE
+        ):
             await flush()
-            built = _deleted_entry_embed(interaction.guild, entry, 10, byte_limit)
-        embed, files, size = built
-        batch_embeds.append(embed)
+        view.add_item(card)
         batch_files.extend(files)
         batch_bytes += size
+        batch_components += components
+        batch_text += text_len
+        batch_cards += 1
     await flush()
 
 
