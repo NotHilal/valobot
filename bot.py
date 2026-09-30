@@ -1293,31 +1293,37 @@ def _log_deleted_message(
     storage.add_deleted_message(message.guild.id, message.author.id, entry)
 
 
+# Audit actions whose entries get merged (with a rising `count`) when a mod repeats them.
+_COUNTED_AUDIT_ACTIONS = (discord.AuditLogAction.message_delete, discord.AuditLogAction.member_move)
+
+
 async def _prime_audit_counts() -> None:
-    """Marks every existing message-delete audit entry as fully accounted for,
-    so deletions that happened while the bot was offline aren't matched later."""
+    """Marks every existing message-delete/member-move audit entry as fully accounted
+    for, so actions that happened while the bot was offline aren't matched later."""
     async with _audit_lock:
         for guild in client.guilds:
             if not guild.me.guild_permissions.view_audit_log:
                 print(f"No View Audit Log permission in {guild.name} - can't tell who deletes messages there")
                 continue
             try:
-                async for entry in guild.audit_logs(limit=100, action=discord.AuditLogAction.message_delete):
-                    _audit_consumed[entry.id] = entry.extra.count
+                for action in _COUNTED_AUDIT_ACTIONS:
+                    async for entry in guild.audit_logs(limit=100, action=action):
+                        _audit_consumed[entry.id] = entry.extra.count
             except discord.HTTPException as exc:
                 print(f"couldn't read audit log for guild {guild.id}: {exc!r}")
 
 
-async def _find_message_deleter(guild: discord.Guild, author_id: int, channel_id: int) -> tuple[int | None, bool]:
-    """(id of the mod who deleted this user's message, whether the audit log
-    could be read). A None id with a readable audit log means a self-delete."""
+async def _find_audit_actor(guild: discord.Guild, action: discord.AuditLogAction, matches) -> tuple[int | None, bool]:
+    """(id of whoever did the not-yet-accounted-for `action` whose entry passes
+    `matches`, whether the audit log could be read). A None id with a readable
+    audit log means nobody else did it - e.g. a self-delete or a self-switch."""
     for delay in AUDIT_LOG_RETRY_DELAYS:
         await asyncio.sleep(delay)
         async with _audit_lock:
             now = discord.utils.utcnow()
             try:
-                async for entry in guild.audit_logs(limit=10, action=discord.AuditLogAction.message_delete):
-                    if entry.target is None or entry.target.id != author_id or entry.extra.channel.id != channel_id:
+                async for entry in guild.audit_logs(limit=10, action=action):
+                    if not matches(entry):
                         continue
                     count = entry.extra.count
                     consumed = _audit_consumed.get(entry.id)
@@ -1333,6 +1339,24 @@ async def _find_message_deleter(guild: discord.Guild, author_id: int, channel_id
                 print(f"audit log lookup failed in guild {guild.id}: {exc!r}")
                 return None, False
     return None, True
+
+
+async def _find_message_deleter(guild: discord.Guild, author_id: int, channel_id: int) -> tuple[int | None, bool]:
+    """(id of the mod who deleted this user's message, whether the audit log could be read)."""
+    return await _find_audit_actor(
+        guild,
+        discord.AuditLogAction.message_delete,
+        lambda e: e.target is not None and e.target.id == author_id and e.extra.channel.id == channel_id,
+    )
+
+
+async def _find_voice_mover(guild: discord.Guild, destination_id: int) -> tuple[int | None, bool]:
+    """(id of the mod who dragged someone into this voice channel, whether the audit
+    log could be read). Move entries don't say which member was moved, so the
+    match is on destination channel and timing."""
+    return await _find_audit_actor(
+        guild, discord.AuditLogAction.member_move, lambda e: e.extra.channel.id == destination_id
+    )
 
 
 def _log_channel(guild: discord.Guild) -> discord.TextChannel | None:
@@ -1366,9 +1390,71 @@ async def _send_log(channel: discord.TextChannel, card: discord.ui.Container, fi
         print(f"couldn't post to the log channel in guild {channel.guild.id}: {exc!r}")
 
 
+MAX_RESTORED_LOGS = 5
+
+
+def _is_log_message(message: discord.Message) -> bool:
+    """One of the bot's own posts in the log channel."""
+    if client.user is None or message.author.id != client.user.id or message.guild is None:
+        return False
+    log_channel = _log_channel(message.guild)
+    return log_channel is not None and message.channel.id == log_channel.id
+
+
+def _message_text(message: discord.Message) -> str:
+    """All the text in a message, including inside a log card's layout."""
+    parts = [message.content] if message.content else []
+
+    def walk(components):
+        for component in components:
+            content = getattr(component, "content", None)
+            if isinstance(content, str):
+                parts.append(content)
+            walk(getattr(component, "children", None) or [])
+
+    walk(message.components)
+    return "\n".join(parts)
+
+
+async def _alert_logs_deleted(
+    log_channel: discord.TextChannel, deleted_by: int | None, restored: list[str], count: int
+) -> None:
+    """Posts a new card when someone deletes the bot's logs, with their text
+    restored, so evidence can't just be wiped. (Images from them are gone.)"""
+    who = f"<@{deleted_by}>" if deleted_by else "Someone"
+    what = "a log entry" if count == 1 else f"{count} log entries"
+    card = discord.ui.Container(accent_colour=discord.Colour.red())
+    card.add_item(discord.ui.TextDisplay(f"-# 🚨 LOG DELETED\n## {who} deleted {what}"))
+
+    budget = 3000 // max(len(restored), 1)
+    for text in restored:
+        if len(text) > budget:
+            text = text[:budget] + "…"
+        card.add_item(discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small))
+        card.add_item(discord.ui.TextDisplay("\n".join(f"> {line}" for line in text.split("\n"))))
+    if not restored:
+        card.add_item(discord.ui.TextDisplay("-# Content unavailable - it was posted before the bot last started."))
+    elif count > len(restored):
+        card.add_item(discord.ui.TextDisplay(f"-# …and {count - len(restored)} more not restored."))
+
+    card.add_item(discord.ui.Separator(visible=False, spacing=discord.SeparatorSpacing.large))
+    card.add_item(discord.ui.TextDisplay(
+        f"**Deleted by:** {f'<@{deleted_by}>' if deleted_by else 'unknown'}\n**Date:** {_now_tag()}"
+    ))
+    await _send_log(log_channel, card)
+    print(f"log entries deleted in guild {log_channel.guild.id} by {deleted_by or 'unknown'} - alert posted")
+
+
 @client.event
 async def on_message_delete(message: discord.Message):
-    if message.guild is None or message.author.bot:
+    if message.guild is None:
+        return
+    if message.author.bot:
+        if _is_log_message(message):
+            deleted_by, audit_ok = await _find_message_deleter(message.guild, client.user.id, message.channel.id)
+            # No audit entry with a readable log means the bot removed its own message.
+            if deleted_by is not None or not audit_ok:
+                await _alert_logs_deleted(message.channel, deleted_by, [_message_text(message)], 1)
         return
     attachments = await _read_attachments(message)
     deleted_by, audit_ok = await _find_message_deleter(message.guild, message.author.id, message.channel.id)
@@ -1394,7 +1480,13 @@ async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
     guild = client.get_guild(payload.guild_id)
     log_channel = _log_channel(guild) if guild else None
     print(f"message {payload.message_id} deleted but wasn't cached (sent before the bot started?)")
-    if log_channel is None or payload.channel_id == log_channel.id:
+    if log_channel is None:
+        return
+    if payload.channel_id == log_channel.id:
+        # Only an audit entry targeting the bot tells us this was one of its logs.
+        deleted_by, _ = await _find_message_deleter(guild, client.user.id, log_channel.id)
+        if deleted_by is not None:
+            await _alert_logs_deleted(log_channel, deleted_by, [], 1)
         return
     card = discord.ui.Container(accent_colour=discord.Colour.dark_grey())
     card.add_item(discord.ui.TextDisplay(
@@ -1420,11 +1512,14 @@ MAX_BULK_LOG_POSTS = 25
 @client.event
 async def on_bulk_message_delete(messages: list[discord.Message]):
     # Bulk deletes (purge commands) always come from a mod or bot, never the author.
-    messages = [m for m in messages if m.guild is not None and not m.author.bot]
-    if not messages:
+    if not messages or messages[0].guild is None:
+        return
+    guild, channel = messages[0].guild, messages[0].channel
+    purged_logs = [m for m in messages if _is_log_message(m)]
+    messages = [m for m in messages if not m.author.bot]
+    if not messages and not purged_logs:
         return
     attachments = {m.id: await _read_attachments(m) for m in messages}
-    guild, channel = messages[0].guild, messages[0].channel
 
     await asyncio.sleep(AUDIT_LOG_RETRY_DELAYS[0])
     deleted_by = None
@@ -1444,6 +1539,10 @@ async def on_bulk_message_delete(messages: list[discord.Message]):
     log_channel = _log_channel(guild)
     if log_channel is None:
         return
+    if purged_logs:
+        await _alert_logs_deleted(
+            log_channel, deleted_by, [_message_text(m) for m in purged_logs[:MAX_RESTORED_LOGS]], len(purged_logs)
+        )
     for m in messages[:MAX_BULK_LOG_POSTS]:
         await _post_deletion_log(log_channel, m, _deletion_entry(m, deleted_by, self_deleted=False), attachments[m.id])
     if len(messages) > MAX_BULK_LOG_POSTS:
@@ -1744,17 +1843,31 @@ def _now_tag() -> str:
 
 
 @client.event
-async def on_message_edit(before: discord.Message, after: discord.Message):
-    # Discord also fires edits when a link preview loads - only real text changes count.
-    if after.guild is None or after.author.bot or before.content == after.content:
+async def on_raw_message_edit(payload: discord.RawMessageUpdateEvent):
+    # The raw event fires for every edit, not just messages still in the bot's
+    # cache - for uncached ones we just don't know the old text.
+    after, before = payload.message, payload.cached_message
+    if after.guild is None or after.author.bot:
         return
+    # Discord also sends updates when a link preview loads - only real text edits count.
+    if before is not None:
+        if before.content == after.content:
+            return
+        before_text = _emphasize(before.content, 1500)
+    else:
+        if after.edited_at is None or (discord.utils.utcnow() - after.edited_at).total_seconds() > 60:
+            return
+        before_text = "*Unknown - the message was sent before the bot last started.*"
+
     log_channel = _log_channel(after.guild)
     if log_channel is None:
+        print(f"message {after.id} by {after.author} edited - no log channel set, run /setuplogs")
         return
+    print(f"message {after.id} by {after.author} edited - posted in #{log_channel.name}")
     card = _log_card(
         discord.Colour.gold(),
         "✏️ MESSAGE EDITED",
-        f"**Before:**\n{_emphasize(before.content, 1500)}\n**After:**\n{_emphasize(after.content, 1500)}",
+        f"**Before:**\n{before_text}\n**After:**\n{_emphasize(after.content, 1500)}",
         [
             f"**Author:** {_user_ref(after.author)}",
             f"**Channel:** <#{after.channel.id}> · [Jump to message]({after.jump_url})",
@@ -1853,16 +1966,34 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
     log_channel = _log_channel(member.guild)
     if log_channel is None:
         return
+    # Voice is frequent, so joins/leaves are a compact one-line card.
     if before.channel is None:
-        colour, label, text = discord.Colour.blurple(), "🔊 VOICE JOIN", f"joined <#{after.channel.id}>"
-    elif after.channel is None:
-        colour, label, text = discord.Colour.dark_grey(), "🔇 VOICE LEAVE", f"left <#{before.channel.id}>"
-    else:
-        colour, label, text = (
-            discord.Colour.blurple(), "🔀 VOICE MOVE", f"moved <#{before.channel.id}> → <#{after.channel.id}>"
+        card = _log_card(
+            discord.Colour.blurple(), "🔊 VOICE JOIN",
+            f"{_user_ref(member)} joined voice channel <#{after.channel.id}> · {_now_tag()}", [],
         )
-    # Voice is frequent, so a compact one-line card instead of the full layout.
-    card = _log_card(colour, label, f"{_user_ref(member)} {text} · {_now_tag()}", [])
+    elif after.channel is None:
+        card = _log_card(
+            discord.Colour.dark_grey(), "🔇 VOICE LEAVE",
+            f"{_user_ref(member)} left voice channel <#{before.channel.id}> · {_now_tag()}", [],
+        )
+    else:
+        mover, audit_ok = await _find_voice_mover(member.guild, after.channel.id)
+        if mover is not None and mover != member.id:
+            headline = f"{_user_ref(member)} was moved to another voice channel"
+            moved_by = f"<@{mover}>"
+        else:
+            headline = f"{_user_ref(member)} switched voice channels"
+            moved_by = "themselves" if audit_ok else "unknown"
+        card = _log_card(
+            discord.Colour.blurple(), "🔀 VOICE CHANNEL SWITCH", headline,
+            [
+                f"**From:** <#{before.channel.id}>",
+                f"**To:** <#{after.channel.id}>",
+                f"**Moved by:** {moved_by}",
+                f"**Date:** {_now_tag()}",
+            ],
+        )
     await _send_log(log_channel, card)
 
 
