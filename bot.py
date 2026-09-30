@@ -296,6 +296,7 @@ async def roll_cmd(interaction: discord.Interaction):
         # /rollskin fired while this one is still in flight can't spend the
         # same charge twice.
         collection["charges"] -= 1
+        owned_ids = {it["id"] for it in collection.get("items", []) if "id" in it}
 
         # A guaranteed /setnextroll skin takes priority over a /nr odds boost.
         forced_item = collection.pop("forced_roll", None)
@@ -319,9 +320,11 @@ async def roll_cmd(interaction: discord.Interaction):
         try:
             async with aiohttp.ClientSession() as http:
                 pool = await gacha.get_pool(http)
-            item = gacha.roll(pool, boost=roll_boost)
+            item = gacha.roll(pool, boost=roll_boost, exclude_ids=owned_ids)
         except Exception as exc:
-            print(f"roll error for user {interaction.user.id}: {exc!r}")
+            collected_all = isinstance(exc, gacha.EmptyPoolError) and bool(owned_ids)
+            if not collected_all:
+                print(f"roll error for user {interaction.user.id}: {exc!r}")
             async with storage.collection_lock:
                 collection = storage.get_collection(guild_id, interaction.user.id)
                 collection["charges"] = min(gacha.MAX_ROLL_CHARGES, collection.get("charges", 0) + 1)
@@ -330,7 +333,10 @@ async def roll_cmd(interaction: discord.Interaction):
                 if boost_before_use is not None:
                     collection["roll_boost"] = boost_before_use
                 storage.save_collection(guild_id, interaction.user.id, collection)
-            await interaction.followup.send("Couldn't fetch the skin pool right now. Try again shortly.")
+            if collected_all:
+                await interaction.followup.send("🏆 You already own every skin in the pool — nothing left to roll!")
+            else:
+                await interaction.followup.send("Couldn't fetch the skin pool right now. Try again shortly.")
             return
 
     async with storage.collection_lock:

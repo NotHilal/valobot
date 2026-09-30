@@ -193,7 +193,7 @@ class EmptyPoolError(Exception):
     """Raised when there are no skins available to roll (e.g. the API fetch failed)."""
 
 
-def roll(pool: dict[str, list[dict]], boost: dict | None = None) -> dict:
+def roll(pool: dict[str, list[dict]], boost: dict | None = None, exclude_ids: set[str] | None = None) -> dict:
     """Pick one random item, weighted by rarity tier, then stamp it with an obtained-at time.
 
     `boost` (optional) is {"item_id": ..., "percent": N}: *if* the rolled
@@ -201,8 +201,17 @@ def roll(pool: dict[str, list[dict]], boost: dict | None = None) -> dict:
     picked out of that tier (the remaining (100-N)% is split evenly across
     every other item in the tier). It has no effect if a different tier gets
     rolled that time - the boost only matters when its own tier comes up.
+
+    `exclude_ids` (optional) removes those items from the pool first, so
+    already-owned items can't be rolled again. A tier left empty is skipped
+    entirely and the remaining tier weights are renormalized.
     """
-    available = {name: items for name, items in pool.items() if items}
+    exclude_ids = exclude_ids or set()
+    available = {
+        name: remaining
+        for name, items in pool.items()
+        if (remaining := [item for item in items if item["id"] not in exclude_ids])
+    }
     if not available:
         raise EmptyPoolError()
     rarity = random.choices(list(available.keys()), weights=[RARITY_WEIGHTS[n] for n in available], k=1)[0]
