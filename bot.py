@@ -1059,8 +1059,8 @@ HELP_COMMANDS = [
     ("/unbanword", "Remove a word from the banned-word list", _is_mod_or_admin),
     ("/banwords", "List all banned words", _is_mod_or_admin),
     ("/checkdeleted", "See the messages and images mods have deleted from a user", _is_mod_or_admin),
-    ("/setuplogs", "Post every deleted message in a channel", _is_mod_or_admin),
-    ("/stoplogs", "Stop posting deleted messages", _is_mod_or_admin),
+    ("/setuplogs", "Post server logs (deleted/edited messages, mod actions, joins, voice) in a channel", _is_mod_or_admin),
+    ("/stoplogs", "Stop posting server logs", _is_mod_or_admin),
     ("/give", "Give a user a specific skin directly", _is_mod_or_admin),
     ("/removeskin", "Remove one skin from a user's collection", _is_mod_or_admin),
     ("/removeallcollection", "Wipe a user's entire collection", _is_mod_or_admin),
@@ -1354,10 +1354,14 @@ async def _post_deletion_log(
         channel.guild, entry, sources, 10, channel.guild.filesize_limit, 40,
         title="-# 🗑️ MESSAGE DELETED", max_content=3000,
     )
+    await _send_log(channel, card, files)
+
+
+async def _send_log(channel: discord.TextChannel, card: discord.ui.Container, files: list[discord.File] = ()) -> None:
     view = discord.ui.LayoutView()
     view.add_item(card)
     try:
-        await channel.send(view=view, files=files, allowed_mentions=discord.AllowedMentions.none())
+        await channel.send(view=view, files=list(files), allowed_mentions=discord.AllowedMentions.none())
     except discord.HTTPException as exc:
         print(f"couldn't post to the log channel in guild {channel.guild.id}: {exc!r}")
 
@@ -1556,9 +1560,9 @@ def _deleted_entry_card(
     return card, files, total_bytes, components
 
 
-@tree.command(name="setuplogs", description="(Mods/Admins only) Post every deleted message in this channel")
+@tree.command(name="setuplogs", description="(Mods/Admins only) Post server logs in this channel")
 @app_commands.default_permissions(administrator=True)
-@app_commands.describe(channel="The channel deleted messages get posted in")
+@app_commands.describe(channel="The channel logs get posted in")
 async def setuplogs_cmd(interaction: discord.Interaction, channel: discord.TextChannel):
     if not _is_mod_or_admin(interaction):
         await interaction.response.send_message("Only mods or admins can do that.", ephemeral=True)
@@ -1577,13 +1581,14 @@ async def setuplogs_cmd(interaction: discord.Interaction, channel: discord.TextC
     storage.set_log_channel(interaction.guild.id, channel.id)
     note = ""
     if not interaction.guild.me.guild_permissions.view_audit_log:
-        note = "\n⚠️ I don't have **View Audit Log**, so I can't tell who deleted each message until you give it to me."
+        note = "\n⚠️ I don't have **View Audit Log**, so I can't tell who deleted messages or log bans/kicks/timeouts until you give it to me."
     await interaction.response.send_message(
-        f"🗑️ Deleted messages will now be posted in {channel.mention}.{note}", ephemeral=True
+        f"📋 Logs will now be posted in {channel.mention}: deleted & edited messages, bans, kicks, "
+        f"timeouts, joins/leaves and voice activity.{note}", ephemeral=True
     )
 
 
-@tree.command(name="stoplogs", description="(Mods/Admins only) Stop posting deleted messages")
+@tree.command(name="stoplogs", description="(Mods/Admins only) Stop posting server logs")
 @app_commands.default_permissions(administrator=True)
 async def stoplogs_cmd(interaction: discord.Interaction):
     if not _is_mod_or_admin(interaction):
@@ -1593,7 +1598,7 @@ async def stoplogs_cmd(interaction: discord.Interaction):
         return
 
     storage.set_log_channel(interaction.guild.id, None)
-    await interaction.response.send_message("✅ Deleted messages are no longer posted anywhere.", ephemeral=True)
+    await interaction.response.send_message("✅ Server logs are no longer posted anywhere.", ephemeral=True)
 
 
 class DeletedLogView(discord.ui.LayoutView):
@@ -1712,6 +1717,155 @@ async def checkdeleted_cmd(interaction: discord.Interaction, user: discord.User)
     )
 
 
+def _log_card(colour: discord.Colour, label: str, headline: str, details: list[str],
+              thumbnail_url: str | None = None) -> discord.ui.Container:
+    """A log-channel card: small grey label, big headline, a gap, then details."""
+    card = discord.ui.Container(accent_colour=colour)
+    top = discord.ui.TextDisplay(f"-# {label}\n{headline}")
+    if thumbnail_url:
+        card.add_item(discord.ui.Section(top, accessory=discord.ui.Thumbnail(thumbnail_url)))
+    else:
+        card.add_item(top)
+    if details:
+        card.add_item(discord.ui.Separator(visible=False, spacing=discord.SeparatorSpacing.large))
+        card.add_item(discord.ui.TextDisplay("\n".join(details)))
+    return card
+
+
+def _user_ref(user: discord.abc.Snowflake) -> str:
+    """A mention plus the plain name/id - mentions of people who left or got
+    banned often render as "unknown user"."""
+    name = getattr(user, "name", None)
+    return f"<@{user.id}> (`{name or user.id}`)"
+
+
+def _now_tag() -> str:
+    return f"<t:{int(discord.utils.utcnow().timestamp())}:f>"
+
+
+@client.event
+async def on_message_edit(before: discord.Message, after: discord.Message):
+    # Discord also fires edits when a link preview loads - only real text changes count.
+    if after.guild is None or after.author.bot or before.content == after.content:
+        return
+    log_channel = _log_channel(after.guild)
+    if log_channel is None:
+        return
+    card = _log_card(
+        discord.Colour.gold(),
+        "✏️ MESSAGE EDITED",
+        f"**Before:**\n{_emphasize(before.content, 1500)}\n**After:**\n{_emphasize(after.content, 1500)}",
+        [
+            f"**Author:** {_user_ref(after.author)}",
+            f"**Channel:** <#{after.channel.id}> · [Jump to message]({after.jump_url})",
+            f"**Date:** {_now_tag()}",
+        ],
+    )
+    await _send_log(log_channel, card)
+
+
+# Moderation actions come straight from the audit log, so they're caught no matter
+# who (or which bot, including this one) did them.
+_MOD_ACTIONS = {
+    discord.AuditLogAction.ban: (discord.Colour.dark_red(), "🔨 MEMBER BANNED", "was banned"),
+    discord.AuditLogAction.unban: (discord.Colour.green(), "🔓 MEMBER UNBANNED", "was unbanned"),
+    discord.AuditLogAction.kick: (discord.Colour.orange(), "👢 MEMBER KICKED", "was kicked"),
+}
+_NO_CHANGE = object()
+
+
+@client.event
+async def on_audit_log_entry_create(entry: discord.AuditLogEntry):
+    log_channel = _log_channel(entry.guild)
+    if log_channel is None or entry.target is None:
+        return
+
+    extra = []
+    if entry.action in _MOD_ACTIONS:
+        colour, label, verb = _MOD_ACTIONS[entry.action]
+    elif entry.action == discord.AuditLogAction.member_update:
+        timed_out_until = getattr(entry.after, "timed_out_until", _NO_CHANGE)
+        if timed_out_until is _NO_CHANGE:
+            return  # some other member change (nickname, etc.)
+        if timed_out_until is None:
+            colour, label, verb = discord.Colour.green(), "🔊 TIMEOUT REMOVED", "is no longer timed out"
+        else:
+            colour, label, verb = discord.Colour.dark_orange(), "🔇 MEMBER TIMED OUT", "was timed out"
+            until = int(timed_out_until.timestamp())
+            extra.append(f"**Until:** <t:{until}:f> (<t:{until}:R>)")
+    else:
+        return
+
+    card = _log_card(colour, label, f"## <@{entry.target.id}> {verb}", [
+        f"**Member:** {_user_ref(entry.target)}",
+        f"**By:** <@{entry.user_id}>" if entry.user_id else "**By:** unknown",
+        f"**Reason:** {entry.reason or '*none given*'}",
+        *extra,
+        f"**Date:** {_now_tag()}",
+    ])
+    await _send_log(log_channel, card)
+
+
+NEW_ACCOUNT_DAYS = 7
+
+
+async def _log_member_join(member: discord.Member) -> None:
+    log_channel = _log_channel(member.guild)
+    if log_channel is None:
+        return
+    created = int(member.created_at.timestamp())
+    details = [f"**Account created:** <t:{created}:f> (<t:{created}:R>)"]
+    if (discord.utils.utcnow() - member.created_at).days < NEW_ACCOUNT_DAYS:
+        details.append("⚠️ **Brand-new account** - possible alt")
+    details += [f"**Member count:** {member.guild.member_count}", f"**Date:** {_now_tag()}"]
+    card = _log_card(
+        discord.Colour.green(), "📥 MEMBER JOINED", f"## {member.mention}\n`{member.name}` · `{member.id}`",
+        details, thumbnail_url=member.display_avatar.url,
+    )
+    await _send_log(log_channel, card)
+
+
+@client.event
+async def on_member_remove(member: discord.Member):
+    # Also fires for kicks and bans - those get their own card from the audit log too.
+    log_channel = _log_channel(member.guild)
+    if log_channel is None:
+        return
+    details = []
+    if member.joined_at:
+        details.append(f"**Joined:** <t:{int(member.joined_at.timestamp())}:R>")
+    roles = [role.mention for role in reversed(member.roles) if not role.is_default()]
+    if roles:
+        details.append(f"**Roles:** {' '.join(roles)[:900]}")
+    details += [f"**Member count:** {member.guild.member_count}", f"**Date:** {_now_tag()}"]
+    card = _log_card(
+        discord.Colour.dark_grey(), "📤 MEMBER LEFT", f"## {member.mention}\n`{member.name}` · `{member.id}`",
+        details, thumbnail_url=member.display_avatar.url,
+    )
+    await _send_log(log_channel, card)
+
+
+@client.event
+async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+    # Only channel changes - mutes, deafens and streams are too noisy to log.
+    if before.channel == after.channel:
+        return
+    log_channel = _log_channel(member.guild)
+    if log_channel is None:
+        return
+    if before.channel is None:
+        colour, label, text = discord.Colour.blurple(), "🔊 VOICE JOIN", f"joined <#{after.channel.id}>"
+    elif after.channel is None:
+        colour, label, text = discord.Colour.dark_grey(), "🔇 VOICE LEAVE", f"left <#{before.channel.id}>"
+    else:
+        colour, label, text = (
+            discord.Colour.blurple(), "🔀 VOICE MOVE", f"moved <#{before.channel.id}> → <#{after.channel.id}>"
+        )
+    # Voice is frequent, so a compact one-line card instead of the full layout.
+    card = _log_card(colour, label, f"{_user_ref(member)} {text} · {_now_tag()}", [])
+    await _send_log(log_channel, card)
+
+
 @client.event
 async def on_member_join(member: discord.Member):
     if member.id in storage.get_instant_ban_list(member.guild.id):
@@ -1719,13 +1873,14 @@ async def on_member_join(member: discord.Member):
             await member.ban(reason="On the instant-ban list")
         except discord.HTTPException as exc:
             print(f"instantban failed for {member.id} in guild {member.guild.id}: {exc!r}")
-            return
+        else:
+            if member.guild.system_channel:
+                try:
+                    await member.guild.system_channel.send(f"🔨 `{member.id}` joined and was instantly banned.")
+                except discord.HTTPException:
+                    pass
 
-        if member.guild.system_channel:
-            try:
-                await member.guild.system_channel.send(f"🔨 `{member.id}` joined and was instantly banned.")
-            except discord.HTTPException:
-                pass
+    await _log_member_join(member)
 
 
 @client.event
