@@ -7,4 +7,6 @@ counting.json
 channel_locks.json
 instant_bans.json
 banned_words.json
+deleted_messages.json
+deleted_media/
 bot.py.bak.*

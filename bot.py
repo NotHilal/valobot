@@ -2,9 +2,10 @@
 plus /rollskin, /collection, /trade for a daily skin-collecting side game,
 plus a counting game in a designated channel."""
 
+import asyncio
 import os
 import re
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import aiohttp
 import discord
@@ -23,7 +24,9 @@ TOKEN = os.environ["DISCORD_TOKEN"]
 intents = discord.Intents.default()
 intents.message_content = True  # needed to read plain chat messages for the counting game
 intents.members = True  # needed to see people joining, for /instantban
-client = discord.Client(intents=intents)
+# Bigger message cache so /checkdeleted can recover older messages - discord.py
+# only reports the content of deleted messages it still has cached.
+client = discord.Client(intents=intents, max_messages=5000)
 tree = app_commands.CommandTree(client)
 
 
@@ -1053,6 +1056,7 @@ HELP_COMMANDS = [
     ("/banword", "Time out anyone who types a specific word", _is_mod_or_admin),
     ("/unbanword", "Remove a word from the banned-word list", _is_mod_or_admin),
     ("/banwords", "List all banned words", _is_mod_or_admin),
+    ("/checkdeleted", "See the messages and images mods have deleted from a user", _is_mod_or_admin),
     ("/give", "Give a user a specific skin directly", _is_mod_or_admin),
     ("/removeskin", "Remove one skin from a user's collection", _is_mod_or_admin),
     ("/removeallcollection", "Wipe a user's entire collection", _is_mod_or_admin),
@@ -1214,6 +1218,235 @@ async def _check_banned_words(message: discord.Message) -> bool:
     return False
 
 
+# Discord's delete events don't say who deleted a message, so we cross-reference
+# the audit log (self-deletes never show up there). Repeat deletions of the same
+# user's messages in the same channel by the same mod get merged into one audit
+# entry whose `count` goes up, so we track how many of each entry's deletions
+# we've already matched to a message.
+_audit_consumed: dict[int, int] = {}
+_audit_lock = asyncio.Lock()
+AUDIT_LOG_DELAY_SECONDS = 1.5  # audit entries can land slightly after the gateway event
+AUDIT_FRESH_SECONDS = 15
+MAX_SAVED_ATTACHMENT_BYTES = 25 * 1024 * 1024
+CHECKDELETED_MAX_ENTRIES = 50
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+
+
+async def _read_attachments(message: discord.Message) -> list[tuple[discord.Attachment, bytes | None]]:
+    """Grabs attachment bytes right away - Discord pulls a deleted message's
+    files off its CDN shortly after deletion, so waiting isn't an option."""
+    result = []
+    for attachment in message.attachments:
+        data = None
+        if attachment.size <= MAX_SAVED_ATTACHMENT_BYTES:
+            for use_cached in (True, False):
+                try:
+                    data = await attachment.read(use_cached=use_cached)
+                    break
+                except discord.HTTPException:
+                    pass
+        result.append((attachment, data))
+    return result
+
+
+def _log_deleted_message(
+    message: discord.Message,
+    deleted_by: int | None,
+    attachments: list[tuple[discord.Attachment, bytes | None]],
+) -> None:
+    saved = []
+    for i, (attachment, data) in enumerate(attachments):
+        file = None
+        if data is not None:
+            ext = os.path.splitext(attachment.filename)[1].lower()
+            if not re.fullmatch(r"\.[a-z0-9]{1,8}", ext):
+                ext = ""
+            file = f"{message.id}_{i}{ext}"
+            storage.save_deleted_media(message.guild.id, file, data)
+        saved.append({"filename": attachment.filename, "file": file})
+
+    storage.add_deleted_message(message.guild.id, message.author.id, {
+        "message_id": message.id,
+        "channel_id": message.channel.id,
+        "content": message.content,
+        "sent_at": message.created_at.isoformat(),
+        "deleted_at": discord.utils.utcnow().isoformat(),
+        "deleted_by": deleted_by,
+        "attachments": saved,
+    })
+
+
+async def _prime_audit_counts() -> None:
+    """Marks every existing message-delete audit entry as fully accounted for,
+    so deletions that happened while the bot was offline aren't matched later."""
+    async with _audit_lock:
+        for guild in client.guilds:
+            if not guild.me.guild_permissions.view_audit_log:
+                print(f"No View Audit Log permission in {guild.name} - deleted-message logging is off there")
+                continue
+            try:
+                async for entry in guild.audit_logs(limit=100, action=discord.AuditLogAction.message_delete):
+                    _audit_consumed[entry.id] = entry.extra.count
+            except discord.HTTPException as exc:
+                print(f"couldn't read audit log for guild {guild.id}: {exc!r}")
+
+
+async def _find_message_deleter(guild: discord.Guild, author_id: int, channel_id: int) -> int | None:
+    """Id of the mod who deleted this user's message, or None if they deleted it themselves."""
+    await asyncio.sleep(AUDIT_LOG_DELAY_SECONDS)
+    async with _audit_lock:
+        now = discord.utils.utcnow()
+        try:
+            async for entry in guild.audit_logs(limit=10, action=discord.AuditLogAction.message_delete):
+                if entry.target is None or entry.target.id != author_id or entry.extra.channel.id != channel_id:
+                    continue
+                count = entry.extra.count
+                consumed = _audit_consumed.get(entry.id)
+                if consumed is None:
+                    # Unseen entry: brand new means this deletion created it; an old
+                    # one we somehow missed is treated as already accounted for.
+                    consumed = 0 if (now - entry.created_at).total_seconds() < AUDIT_FRESH_SECONDS else count
+                if consumed < count:
+                    _audit_consumed[entry.id] = consumed + 1
+                    return entry.user_id
+                _audit_consumed[entry.id] = consumed
+        except discord.HTTPException as exc:
+            print(f"audit log lookup failed in guild {guild.id}: {exc!r}")
+    return None
+
+
+@client.event
+async def on_message_delete(message: discord.Message):
+    if message.guild is None or message.author.bot:
+        return
+    attachments = await _read_attachments(message)
+    deleted_by = await _find_message_deleter(message.guild, message.author.id, message.channel.id)
+    if deleted_by is not None:
+        _log_deleted_message(message, deleted_by, attachments)
+
+
+@client.event
+async def on_bulk_message_delete(messages: list[discord.Message]):
+    # Bulk deletes (purge commands) always come from a mod or bot, never the author.
+    messages = [m for m in messages if m.guild is not None and not m.author.bot]
+    if not messages:
+        return
+    attachments = {m.id: await _read_attachments(m) for m in messages}
+    guild, channel = messages[0].guild, messages[0].channel
+
+    await asyncio.sleep(AUDIT_LOG_DELAY_SECONDS)
+    deleted_by = None
+    now = discord.utils.utcnow()
+    try:
+        async for entry in guild.audit_logs(limit=5, action=discord.AuditLogAction.message_bulk_delete):
+            is_fresh = (now - entry.created_at).total_seconds() < AUDIT_FRESH_SECONDS
+            if entry.target is not None and entry.target.id == channel.id and is_fresh:
+                deleted_by = entry.user_id
+                break
+    except discord.HTTPException as exc:
+        print(f"bulk-delete audit log lookup failed in guild {guild.id}: {exc!r}")
+
+    for m in messages:
+        _log_deleted_message(m, deleted_by, attachments[m.id])
+
+
+def _deleted_entry_embed(
+    guild: discord.Guild, entry: dict, room_for_files: int, byte_budget: int
+) -> tuple[discord.Embed, list[discord.File], int] | None:
+    """One logged deletion as (embed, files, total file bytes), or None if its
+    files don't fit in the remaining room of the message being built."""
+    content = entry["content"]
+    embed = discord.Embed(
+        description=(content[:1500] + "…" if len(content) > 1500 else content) or "*(no text)*",
+        color=discord.Color.red(),
+        timestamp=datetime.fromisoformat(entry["deleted_at"]),
+    )
+    sent_at = int(datetime.fromisoformat(entry["sent_at"]).timestamp())
+    embed.add_field(name="Channel", value=f"<#{entry['channel_id']}>")
+    embed.add_field(name="Deleted by", value=f"<@{entry['deleted_by']}>" if entry["deleted_by"] else "unknown")
+    embed.add_field(name="Sent", value=f"<t:{sent_at}:f>")
+    embed.set_footer(text="Deleted")
+
+    files, total_bytes, notes = [], 0, []
+    for attachment in entry["attachments"]:
+        path = storage.deleted_media_path(guild.id, attachment["file"]) if attachment["file"] else None
+        if path is None or not os.path.exists(path):
+            notes.append(f"{attachment['filename']} (couldn't be saved)")
+            continue
+        size = os.path.getsize(path)
+        if size > guild.filesize_limit:
+            notes.append(f"{attachment['filename']} (too big to re-upload)")
+            continue
+        if len(files) >= room_for_files or total_bytes + size > byte_budget:
+            return None
+        files.append(discord.File(path, filename=attachment["file"]))
+        total_bytes += size
+        if embed.image.url is None and os.path.splitext(attachment["file"])[1] in IMAGE_EXTENSIONS:
+            embed.set_image(url=f"attachment://{attachment['file']}")
+        else:
+            notes.append(attachment["filename"])
+    if notes:
+        embed.add_field(name="Attachments", value="\n".join(notes)[:1024], inline=False)
+    return embed, files, total_bytes
+
+
+@tree.command(name="checkdeleted", description="(Mods/Admins only) See the messages mods have deleted from a user")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(user="The user whose deleted messages you want to see")
+async def checkdeleted_cmd(interaction: discord.Interaction, user: discord.User):
+    if not _is_mod_or_admin(interaction):
+        await interaction.response.send_message("Only mods or admins can do that.", ephemeral=True)
+        return
+    if interaction.guild is None:
+        return
+
+    logs = storage.get_deleted_messages(interaction.guild.id, user.id)
+    if not logs:
+        await interaction.response.send_message(f"No mod-deleted messages logged for {user.mention}.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True, thinking=True)
+
+    shown = logs[-CHECKDELETED_MAX_ENTRIES:][::-1]  # newest first
+    header = f"🗑️ **{len(logs)}** mod-deleted message{'s' if len(logs) != 1 else ''} from {user.mention}"
+    if len(shown) < len(logs):
+        header += f" (showing the latest {len(shown)})"
+    byte_limit = interaction.guild.filesize_limit
+
+    # Pack entries into as few messages as Discord allows: 10 embeds, 10 files,
+    # 6000 embed characters and the upload size limit per message.
+    batch_embeds: list[discord.Embed] = []
+    batch_files: list[discord.File] = []
+    batch_bytes = 0
+    sent_header = False
+
+    async def flush():
+        nonlocal batch_embeds, batch_files, batch_bytes, sent_header
+        if not batch_embeds:
+            return
+        kwargs = {"embeds": batch_embeds, "files": batch_files, "ephemeral": True}
+        if not sent_header:
+            kwargs["content"] = header
+            sent_header = True
+        try:
+            await interaction.followup.send(**kwargs)
+        except discord.HTTPException as exc:
+            print(f"checkdeleted send failed in guild {interaction.guild.id}: {exc!r}")
+            await interaction.followup.send("⚠️ Some entries couldn't be sent.", ephemeral=True)
+        batch_embeds, batch_files, batch_bytes = [], [], 0
+
+    for entry in shown:
+        built = _deleted_entry_embed(interaction.guild, entry, 10 - len(batch_files), byte_limit - batch_bytes)
+        too_long = built is not None and sum(len(e) for e in batch_embeds) + len(built[0]) > 5500
+        if built is None or too_long or len(batch_embeds) >= 10:
+            await flush()
+            built = _deleted_entry_embed(interaction.guild, entry, 10, byte_limit)
+        embed, files, size = built
+        batch_embeds.append(embed)
+        batch_files.extend(files)
+        batch_bytes += size
+    await flush()
+
+
 @client.event
 async def on_member_join(member: discord.Member):
     if member.id in storage.get_instant_ban_list(member.guild.id):
@@ -1275,6 +1508,7 @@ async def on_ready():
         tree.copy_global_to(guild=guild)
         await tree.sync(guild=guild)
         print(f"Synced commands to guild: {guild.name} (id: {guild.id})")
+    await _prime_audit_counts()
     print(f"Logged in as {client.user} (id: {client.user.id})")
 
 

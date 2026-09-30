@@ -11,6 +11,8 @@ COUNTING_FILE = os.path.join(_DIR, "counting.json")
 CHANNEL_LOCKS_FILE = os.path.join(_DIR, "channel_locks.json")
 INSTANT_BANS_FILE = os.path.join(_DIR, "instant_bans.json")
 BANNED_WORDS_FILE = os.path.join(_DIR, "banned_words.json")
+DELETED_MESSAGES_FILE = os.path.join(_DIR, "deleted_messages.json")
+DELETED_MEDIA_DIR = os.path.join(_DIR, "deleted_media")
 
 # Guards read-modify-write sequences on collections.json. Any caller that reads a
 # collection, mutates it, and writes it back must hold this across the whole
@@ -151,3 +153,27 @@ def remove_banned_word(guild_id: int, word: str) -> bool:
     data[str(guild_id)] = guild_words
     _save(BANNED_WORDS_FILE, data)
     return True
+
+
+def add_deleted_message(guild_id: int, user_id: int, entry: dict) -> None:
+    data = _load(DELETED_MESSAGES_FILE)
+    guild_logs = data.get(str(guild_id), {})
+    guild_logs.setdefault(str(user_id), []).append(entry)
+    data[str(guild_id)] = guild_logs
+    _save(DELETED_MESSAGES_FILE, data)
+
+
+def get_deleted_messages(guild_id: int, user_id: int) -> list[dict]:
+    """Oldest first."""
+    return _load(DELETED_MESSAGES_FILE).get(str(guild_id), {}).get(str(user_id), [])
+
+
+def deleted_media_path(guild_id: int, name: str) -> str:
+    return os.path.join(DELETED_MEDIA_DIR, str(guild_id), name)
+
+
+def save_deleted_media(guild_id: int, name: str, data: bytes) -> None:
+    path = deleted_media_path(guild_id, name)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(data)
