@@ -1364,30 +1364,42 @@ def _log_channel(guild: discord.Guild) -> discord.TextChannel | None:
     return guild.get_channel(channel_id) if channel_id else None
 
 
-async def _post_deletion_log(
-    channel: discord.TextChannel,
+def _deletion_log_card(
+    guild: discord.Guild,
     message: discord.Message,
     entry: dict,
     attachments: list[tuple[discord.Attachment, bytes | None]],
-) -> None:
+) -> tuple[discord.ui.Container, list[discord.File]]:
     sources = [
         (a.filename, _upload_name(message, i, a.filename) if data is not None else None, data)
         for i, (a, data) in enumerate(attachments)
     ]
     card, files, _, _ = _deleted_entry_card(
-        channel.guild, entry, sources, 10, channel.guild.filesize_limit, 40,
-        title="-# 🗑️ MESSAGE DELETED", max_content=3000,
+        guild, entry, sources, 10, guild.filesize_limit, 40, title="-# 🗑️ MESSAGE DELETED", max_content=3000
     )
-    await _send_log(channel, card, files)
+    return card, files
 
 
-async def _send_log(channel: discord.TextChannel, card: discord.ui.Container, files: list[discord.File] = ()) -> None:
+async def _post_deletion_log(
+    channel: discord.TextChannel,
+    message: discord.Message,
+    entry: dict,
+    attachments: list[tuple[discord.Attachment, bytes | None]],
+) -> discord.Message | None:
+    card, files = _deletion_log_card(channel.guild, message, entry, attachments)
+    return await _send_log(channel, card, files)
+
+
+async def _send_log(
+    channel: discord.TextChannel, card: discord.ui.Container, files: list[discord.File] = ()
+) -> discord.Message | None:
     view = discord.ui.LayoutView()
     view.add_item(card)
     try:
-        await channel.send(view=view, files=list(files), allowed_mentions=discord.AllowedMentions.none())
+        return await channel.send(view=view, files=list(files), allowed_mentions=discord.AllowedMentions.none())
     except discord.HTTPException as exc:
         print(f"couldn't post to the log channel in guild {channel.guild.id}: {exc!r}")
+        return None
 
 
 MAX_RESTORED_LOGS = 5
@@ -1457,17 +1469,37 @@ async def on_message_delete(message: discord.Message):
                 await _alert_logs_deleted(message.channel, deleted_by, [_message_text(message)], 1)
         return
     attachments = await _read_attachments(message)
+
+    # Post right away with "checking…" - finding out who deleted it means waiting
+    # on the audit log (several seconds for self-deletes, which never show up
+    # there) - then fill in the "Deleted by" line once we know.
+    log_channel = _log_channel(message.guild)
+    posted = None
+    if log_channel is not None:
+        pending = _deletion_entry(message, None, self_deleted=False)
+        pending["pending"] = True
+        posted = await _post_deletion_log(log_channel, message, pending, attachments)
+
     deleted_by, audit_ok = await _find_message_deleter(message.guild, message.author.id, message.channel.id)
     if deleted_by is not None:
         _log_deleted_message(message, deleted_by, attachments)
 
     who = f"mod {deleted_by}" if deleted_by else ("themselves" if audit_ok else "unknown (audit log unreadable)")
-    log_channel = _log_channel(message.guild)
     if log_channel is None:
         print(f"message {message.id} by {message.author} deleted by {who} - no log channel set, run /setuplogs")
         return
-    entry = _deletion_entry(message, deleted_by, self_deleted=deleted_by is None and audit_ok)
-    await _post_deletion_log(log_channel, message, entry, attachments)
+    if posted is not None:
+        # Rebuild from the posted message (its images already point at the uploaded
+        # files) and only swap the placeholder.
+        resolved = f"<@{deleted_by}>" if deleted_by else ("themselves" if audit_ok else "unknown")
+        view = discord.ui.LayoutView.from_message(posted)
+        for item in view.walk_children():
+            if isinstance(item, discord.ui.TextDisplay) and "⏳ checking…" in item.content:
+                item.content = item.content.replace("⏳ checking…", resolved)
+        try:
+            await posted.edit(view=view, allowed_mentions=discord.AllowedMentions.none())
+        except discord.HTTPException as exc:
+            print(f"couldn't update the deletion log in guild {message.guild.id}: {exc!r}")
     print(f"message {message.id} by {message.author} deleted by {who} - posted in #{log_channel.name}")
 
 
@@ -1629,7 +1661,9 @@ def _deleted_entry_card(
 
     content = _emphasize(entry["content"], max_content)
     deleted_at = int(datetime.fromisoformat(entry["deleted_at"]).timestamp())
-    if entry["deleted_by"]:
+    if entry.get("pending"):
+        deleted_by = "⏳ checking…"
+    elif entry["deleted_by"]:
         deleted_by = f"<@{entry['deleted_by']}>"
     elif entry.get("self_deleted"):
         deleted_by = "themselves"
