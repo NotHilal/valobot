@@ -1225,8 +1225,9 @@ async def _check_banned_words(message: discord.Message) -> bool:
 # we've already matched to a message.
 _audit_consumed: dict[int, int] = {}
 _audit_lock = asyncio.Lock()
-AUDIT_LOG_DELAY_SECONDS = 1.5  # audit entries can land slightly after the gateway event
-AUDIT_FRESH_SECONDS = 15
+# Audit entries can land a few seconds after the gateway event, so look a few times.
+AUDIT_LOG_RETRY_DELAYS = (1.5, 2, 4)
+AUDIT_FRESH_SECONDS = 20
 MAX_SAVED_ATTACHMENT_BYTES = 25 * 1024 * 1024
 CHECKDELETED_MAX_ENTRIES = 50
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
@@ -1293,25 +1294,27 @@ async def _prime_audit_counts() -> None:
 
 async def _find_message_deleter(guild: discord.Guild, author_id: int, channel_id: int) -> int | None:
     """Id of the mod who deleted this user's message, or None if they deleted it themselves."""
-    await asyncio.sleep(AUDIT_LOG_DELAY_SECONDS)
-    async with _audit_lock:
-        now = discord.utils.utcnow()
-        try:
-            async for entry in guild.audit_logs(limit=10, action=discord.AuditLogAction.message_delete):
-                if entry.target is None or entry.target.id != author_id or entry.extra.channel.id != channel_id:
-                    continue
-                count = entry.extra.count
-                consumed = _audit_consumed.get(entry.id)
-                if consumed is None:
-                    # Unseen entry: brand new means this deletion created it; an old
-                    # one we somehow missed is treated as already accounted for.
-                    consumed = 0 if (now - entry.created_at).total_seconds() < AUDIT_FRESH_SECONDS else count
-                if consumed < count:
-                    _audit_consumed[entry.id] = consumed + 1
-                    return entry.user_id
-                _audit_consumed[entry.id] = consumed
-        except discord.HTTPException as exc:
-            print(f"audit log lookup failed in guild {guild.id}: {exc!r}")
+    for delay in AUDIT_LOG_RETRY_DELAYS:
+        await asyncio.sleep(delay)
+        async with _audit_lock:
+            now = discord.utils.utcnow()
+            try:
+                async for entry in guild.audit_logs(limit=10, action=discord.AuditLogAction.message_delete):
+                    if entry.target is None or entry.target.id != author_id or entry.extra.channel.id != channel_id:
+                        continue
+                    count = entry.extra.count
+                    consumed = _audit_consumed.get(entry.id)
+                    if consumed is None:
+                        # Unseen entry: brand new means this deletion created it; an old
+                        # one we somehow missed is treated as already accounted for.
+                        consumed = 0 if (now - entry.created_at).total_seconds() < AUDIT_FRESH_SECONDS else count
+                    if consumed < count:
+                        _audit_consumed[entry.id] = consumed + 1
+                        return entry.user_id
+                    _audit_consumed[entry.id] = consumed
+            except discord.HTTPException as exc:
+                print(f"audit log lookup failed in guild {guild.id}: {exc!r}")
+                return None
     return None
 
 
@@ -1323,6 +1326,15 @@ async def on_message_delete(message: discord.Message):
     deleted_by = await _find_message_deleter(message.guild, message.author.id, message.channel.id)
     if deleted_by is not None:
         _log_deleted_message(message, deleted_by, attachments)
+        print(f"logged message {message.id} by {message.author} - deleted by mod {deleted_by}")
+    else:
+        print(f"message {message.id} by {message.author} deleted - no audit entry, treated as a self-delete")
+
+
+@client.event
+async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
+    if payload.guild_id is not None and payload.cached_message is None:
+        print(f"message {payload.message_id} deleted but wasn't cached (sent before the bot started?) - can't log it")
 
 
 @client.event
@@ -1334,7 +1346,7 @@ async def on_bulk_message_delete(messages: list[discord.Message]):
     attachments = {m.id: await _read_attachments(m) for m in messages}
     guild, channel = messages[0].guild, messages[0].channel
 
-    await asyncio.sleep(AUDIT_LOG_DELAY_SECONDS)
+    await asyncio.sleep(AUDIT_LOG_RETRY_DELAYS[0])
     deleted_by = None
     now = discord.utils.utcnow()
     try:
