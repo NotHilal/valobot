@@ -1750,6 +1750,8 @@ async def pauselogs_cmd(interaction: discord.Interaction):
     storage.set_logs_paused(interaction.guild.id, paused)
     if paused:
         msg = "⏸️ Server logs paused. Run `/pauselogs` again to resume."
+    elif storage.get_log_channel(interaction.guild.id) is None:
+        msg = "▶️ Logs unpaused, but no log channel is set (was `/stoplogs` used?). Run `/setuplogs` to pick one."
     else:
         msg = "▶️ Server logs resumed."
     await interaction.response.send_message(msg, ephemeral=True)
