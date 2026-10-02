@@ -189,3 +189,17 @@ def set_log_channel(guild_id: int, channel_id: int | None) -> None:
     data = _load(LOG_CHANNELS_FILE)
     data[str(guild_id)] = channel_id
     _save(LOG_CHANNELS_FILE, data)
+
+
+LOGS_PAUSED_FILE = os.path.join(_DIR, "logs_paused.json")
+
+
+def logs_paused(guild_id: int) -> bool:
+    """True while the bot owner has paused logging - the log channel is kept."""
+    return _load(LOGS_PAUSED_FILE).get(str(guild_id), False)
+
+
+def set_logs_paused(guild_id: int, paused: bool) -> None:
+    data = _load(LOGS_PAUSED_FILE)
+    data[str(guild_id)] = paused
+    _save(LOGS_PAUSED_FILE, data)

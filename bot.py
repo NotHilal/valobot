@@ -1360,6 +1360,8 @@ async def _find_voice_mover(guild: discord.Guild, destination_id: int) -> tuple[
 
 
 def _log_channel(guild: discord.Guild) -> discord.TextChannel | None:
+    if storage.logs_paused(guild.id):
+        return None
     channel_id = storage.get_log_channel(guild.id)
     return guild.get_channel(channel_id) if channel_id else None
 
@@ -1734,6 +1736,25 @@ async def stoplogs_cmd(interaction: discord.Interaction):
     await interaction.response.send_message("✅ Server logs are no longer posted anywhere.", ephemeral=True)
 
 
+@tree.command(name="pauselogs", description="Pause or resume server logs")
+@app_commands.default_permissions(administrator=True)
+async def pauselogs_cmd(interaction: discord.Interaction):
+    # Bot owner only, and left out of /helpme. Discord can't hide a command from
+    # everyone but one user, so default_permissions keeps it out of non-admins'
+    # menus; restrict it to just you in Server Settings > Integrations.
+    if interaction.guild is None or interaction.user.id != client.application.owner.id:
+        await interaction.response.send_message("You can't use this command.", ephemeral=True)
+        return
+
+    paused = not storage.logs_paused(interaction.guild.id)
+    storage.set_logs_paused(interaction.guild.id, paused)
+    if paused:
+        msg = "⏸️ Server logs paused. Run `/pauselogs` again to resume."
+    else:
+        msg = "▶️ Server logs resumed."
+    await interaction.response.send_message(msg, ephemeral=True)
+
+
 class DeletedLogView(discord.ui.LayoutView):
     """Public, paginated /checkdeleted result. Anyone can flip pages, with a
     shared cooldown so people can't flip it out from under each other."""
@@ -1992,11 +2013,35 @@ async def on_member_remove(member: discord.Member):
     await _send_log(log_channel, card)
 
 
+# When each member entered their current voice channel, keyed by (guild id, member id).
+# In memory only - people already in voice when the bot starts have no entry.
+_voice_joined_at: dict[tuple[int, int], datetime] = {}
+
+
+def _format_duration(seconds: float) -> str:
+    seconds = int(seconds)
+    hours, rest = divmod(seconds, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
 @client.event
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
     # Only channel changes - mutes, deafens and streams are too noisy to log.
     if before.channel == after.channel:
         return
+    key = (member.guild.id, member.id)
+    joined_at = _voice_joined_at.pop(key, None)
+    if after.channel is not None:
+        _voice_joined_at[key] = discord.utils.utcnow()
+    stayed = ""
+    if joined_at is not None:
+        stayed = f" after {_format_duration((discord.utils.utcnow() - joined_at).total_seconds())}"
+
     log_channel = _log_channel(member.guild)
     if log_channel is None:
         return
@@ -2009,7 +2054,7 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
     elif after.channel is None:
         card = _log_card(
             discord.Colour.dark_grey(), "🔇 VOICE LEAVE",
-            f"{_user_ref(member)} left voice channel <#{before.channel.id}> · {_now_tag()}", [],
+            f"{_user_ref(member)} left voice channel <#{before.channel.id}>{stayed} · {_now_tag()}", [],
         )
     else:
         mover, audit_ok = await _find_voice_mover(member.guild, after.channel.id)
