@@ -830,7 +830,7 @@ async def setnextroll_cmd(interaction: discord.Interaction, user: discord.Member
     if interaction.guild is None:
         return
 
-    await interaction.response.defer(thinking=True)
+    await interaction.response.defer(thinking=True, ephemeral=True)
     async with aiohttp.ClientSession() as http:
         pool = await gacha.get_pool(http)
     item = gacha.find_in_pool(pool, skin)
@@ -844,7 +844,8 @@ async def setnextroll_cmd(interaction: discord.Interaction, user: discord.Member
         storage.save_collection(interaction.guild.id, user.id, collection)
 
     await interaction.followup.send(
-        f"🎯 {user.display_name}'s next `/rollskin` is guaranteed to be **{item['name']}** ({item['rarity']})."
+        f"🎯 {user.display_name}'s next `/rollskin` is guaranteed to be **{item['name']}** ({item['rarity']}).",
+        ephemeral=True,
     )
 
 
