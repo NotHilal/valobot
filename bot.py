@@ -1059,6 +1059,8 @@ HELP_COMMANDS = [
     ("/banword", "Time out anyone who types a specific word", _is_mod_or_admin),
     ("/unbanword", "Remove a word from the banned-word list", _is_mod_or_admin),
     ("/banwords", "List all banned words", _is_mod_or_admin),
+    ("/reactionrole", "Let people get a role by reacting to a menu in this channel", _is_mod_or_admin),
+    ("/removereactionrole", "Remove an emoji from this channel's role menu", _is_mod_or_admin),
     ("/checkdeleted", "See the messages and images mods have deleted from a user", _is_mod_or_admin),
     ("/setuplogs", "Post server logs (deleted/edited messages, mod actions, joins, voice) in a channel", _is_mod_or_admin),
     ("/stoplogs", "Stop posting server logs", _is_mod_or_admin),
@@ -1196,6 +1198,170 @@ async def banwords_cmd(interaction: discord.Interaction):
         for word, minutes in sorted(banned.items())
     ]
     await interaction.response.send_message("🚫 **Banned words:**\n" + "\n".join(lines), ephemeral=True)
+
+
+def _emoji_key(emoji: str) -> str:
+    return str(discord.PartialEmoji.from_str(emoji.strip()))
+
+
+def _find_menu_emoji(menu: dict, emoji: str) -> str | None:
+    """The menu's own spelling of emoji, if it's on the menu. Reaction events don't
+    always carry the U+FE0F variation selector a typed emoji has (❤️ vs ❤), so
+    compare without it."""
+    target = emoji.replace("️", "")
+    return next((e for e in menu["roles"] if e.replace("️", "") == target), None)
+
+
+def _role_menu_embed(guild: discord.Guild, menu: dict) -> discord.Embed:
+    lines = []
+    for emoji, role_id in menu["roles"].items():
+        role = guild.get_role(role_id)
+        lines.append(f"{emoji} — {role.mention if role else '*(deleted role)*'}")
+    return discord.Embed(
+        title="🎭 Pick your roles",
+        description="React below to get a role, remove your reaction to drop it.\n\n" + "\n".join(lines),
+        color=discord.Color.blurple(),
+    )
+
+
+async def _fetch_role_menu_message(channel: discord.TextChannel, menu: dict) -> discord.Message | None:
+    if menu["message_id"] is None:
+        return None
+    try:
+        return await channel.fetch_message(menu["message_id"])
+    except discord.NotFound:
+        return None
+
+
+@tree.command(name="reactionrole", description="(Mods/Admins only) Let people get a role by reacting in this channel")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(emoji="The emoji people react with", role="The role they get")
+async def reactionrole_cmd(interaction: discord.Interaction, emoji: str, role: discord.Role):
+    if not _is_mod_or_admin(interaction):
+        await interaction.response.send_message("Only mods or admins can do that.", ephemeral=True)
+        return
+    if interaction.guild is None or not isinstance(interaction.channel, discord.TextChannel):
+        await interaction.response.send_message("Run this in a server text channel.", ephemeral=True)
+        return
+
+    guild = interaction.guild
+    me = guild.me
+    if role.is_default() or role.managed:
+        await interaction.response.send_message("That role can't be handed out.", ephemeral=True)
+        return
+    if not me.guild_permissions.manage_roles or role >= me.top_role:
+        await interaction.response.send_message(
+            f"I need **Manage Roles**, and my highest role has to be above {role.mention} in the role list.",
+            ephemeral=True,
+        )
+        return
+    # Without this, a mod could hand everyone a role higher than their own (e.g. an admin role).
+    if not _is_owner(interaction) and role >= interaction.user.top_role:
+        await interaction.response.send_message(
+            "You can only set up roles below your own highest role.", ephemeral=True
+        )
+        return
+
+    key = _emoji_key(emoji)
+    await interaction.response.defer(thinking=True, ephemeral=True)
+
+    channel = interaction.channel
+    menu = storage.get_role_menu(guild.id, channel.id)
+    key = _find_menu_emoji(menu, key) or key
+    menu["roles"][key] = role.id
+    embed = _role_menu_embed(guild, menu)
+
+    message = await _fetch_role_menu_message(channel, menu)
+    try:
+        if message is None:
+            message = await channel.send(embed=embed)
+            menu["message_id"] = message.id
+            # A fresh message needs every emoji re-added, not just the new one.
+            emojis_to_react = list(menu["roles"])
+        else:
+            await message.edit(embed=embed)
+            emojis_to_react = [key]
+        for e in emojis_to_react:
+            await message.add_reaction(e)
+    except discord.HTTPException as exc:
+        await interaction.followup.send(
+            f"Couldn't set that up ({exc.text or exc}). If it's a custom emoji, it has to be from a server I'm in.",
+            ephemeral=True,
+        )
+        return
+
+    storage.save_role_menu(guild.id, channel.id, menu)
+    await interaction.followup.send(f"✅ Reacting with {key} now gives {role.mention}.", ephemeral=True)
+
+
+@tree.command(name="removereactionrole", description="(Mods/Admins only) Remove an emoji from this channel's role menu")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(emoji="The emoji to remove")
+async def removereactionrole_cmd(interaction: discord.Interaction, emoji: str):
+    if not _is_mod_or_admin(interaction):
+        await interaction.response.send_message("Only mods or admins can do that.", ephemeral=True)
+        return
+    if interaction.guild is None or not isinstance(interaction.channel, discord.TextChannel):
+        await interaction.response.send_message("Run this in a server text channel.", ephemeral=True)
+        return
+
+    guild, channel = interaction.guild, interaction.channel
+    menu = storage.get_role_menu(guild.id, channel.id)
+    key = _find_menu_emoji(menu, _emoji_key(emoji))
+    if key is None:
+        await interaction.response.send_message(f"{emoji} isn't on this channel's role menu.", ephemeral=True)
+        return
+
+    await interaction.response.defer(thinking=True, ephemeral=True)
+    del menu["roles"][key]
+    message = await _fetch_role_menu_message(channel, menu)
+    try:
+        if not menu["roles"]:
+            if message is not None:
+                await message.delete()
+            storage.save_role_menu(guild.id, channel.id, None)
+            await interaction.followup.send("🗑️ That was the last role, so I removed the menu.", ephemeral=True)
+            return
+        if message is not None:
+            await message.edit(embed=_role_menu_embed(guild, menu))
+            await message.clear_reaction(key)
+    except discord.HTTPException:
+        pass  # the stored menu is what matters; a stale reaction is harmless
+    storage.save_role_menu(guild.id, channel.id, menu)
+    await interaction.followup.send(f"✅ Removed {key} from the role menu.", ephemeral=True)
+
+
+async def _handle_role_reaction(payload: discord.RawReactionActionEvent, adding: bool) -> None:
+    if payload.guild_id is None or payload.user_id == client.user.id:
+        return
+    menu = storage.find_role_menu_by_message(payload.guild_id, payload.message_id)
+    if menu is None:
+        return
+    role_id = menu["roles"].get(_find_menu_emoji(menu, str(payload.emoji)))
+    guild = client.get_guild(payload.guild_id)
+    if role_id is None or guild is None:
+        return
+    role = guild.get_role(role_id)
+    member = payload.member or guild.get_member(payload.user_id)
+    if role is None or member is None or member.bot:
+        return
+    try:
+        if adding:
+            await member.add_roles(role, reason="Reaction role")
+        else:
+            await member.remove_roles(role, reason="Reaction role")
+    except discord.HTTPException as exc:
+        print(f"reaction role failed for {member.id} in guild {guild.id}: {exc!r}")
+
+
+@client.event
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    await _handle_role_reaction(payload, adding=True)
+
+
+@client.event
+async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
+    await _handle_role_reaction(payload, adding=False)
 
 
 async def _check_banned_words(message: discord.Message) -> bool:

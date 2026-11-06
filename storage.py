@@ -203,3 +203,34 @@ def set_logs_paused(guild_id: int, paused: bool) -> None:
     data = _load(LOGS_PAUSED_FILE)
     data[str(guild_id)] = paused
     _save(LOGS_PAUSED_FILE, data)
+
+
+REACTION_ROLES_FILE = os.path.join(_DIR, "reaction_roles.json")
+
+
+def get_role_menu(guild_id: int, channel_id: int) -> dict:
+    """The bot's reaction-role message in a channel: its message id and an
+    emoji -> role id map. message_id is None until the first role is added."""
+    return _load(REACTION_ROLES_FILE).get(str(guild_id), {}).get(str(channel_id)) or {
+        "message_id": None,
+        "roles": {},
+    }
+
+
+def save_role_menu(guild_id: int, channel_id: int, menu: dict | None) -> None:
+    """Pass None to delete the channel's menu."""
+    data = _load(REACTION_ROLES_FILE)
+    guild_menus = data.get(str(guild_id), {})
+    if menu is None:
+        guild_menus.pop(str(channel_id), None)
+    else:
+        guild_menus[str(channel_id)] = menu
+    data[str(guild_id)] = guild_menus
+    _save(REACTION_ROLES_FILE, data)
+
+
+def find_role_menu_by_message(guild_id: int, message_id: int) -> dict | None:
+    for menu in _load(REACTION_ROLES_FILE).get(str(guild_id), {}).values():
+        if menu.get("message_id") == message_id:
+            return menu
+    return None
