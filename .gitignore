@@ -13,3 +13,4 @@ log_channels.json
 logs_paused.json
 bot.py.bak.*
 reaction_roles.json
+custom_games.json

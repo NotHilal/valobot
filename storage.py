@@ -1,8 +1,10 @@
 """Tiny JSON-file storage for per-Discord-user Riot sessions and skin collections."""
 
 import asyncio
+import copy
 import json
 import os
+from pathlib import Path
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
 USERS_FILE = os.path.join(_DIR, "users.json")
@@ -249,3 +251,46 @@ def find_role_menu_by_message(guild_id: int, message_id: int) -> dict | None:
         if menu.get("message_id") == message_id:
             return menu
     return None
+
+
+CUSTOM_GAMES_FILE = Path(_DIR) / "custom_games.json"
+
+
+# Per-server custom game data (games in progress, leaderboard, map list), used as
+# client.store by customgame.py. Copied from the Mikasa bot, along with
+# customgame.py itself.
+class Store:
+    def __init__(self, path: Path):
+        self.path = path
+        self._data: dict[str, dict] = self._load()
+
+    def _load(self) -> dict[str, dict]:
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return {}
+        except json.JSONDecodeError as exc:
+            # Starting empty would overwrite every server's settings on the next save.
+            raise SystemExit(f"{self.path} is corrupted ({exc}). Fix or delete it, then restart.") from exc
+
+    def get(self, guild_id: int) -> dict:
+        # A deep copy, so a caller's edits only count once passed to update().
+        return copy.deepcopy(self._data.get(str(guild_id), {}))
+
+    def update(self, guild_id: int, **changes) -> None:
+        """Set the given values. A value of None removes that setting."""
+        entry = self._data.setdefault(str(guild_id), {})
+        for key, value in changes.items():
+            if value is None:
+                entry.pop(key, None)
+            else:
+                entry[key] = value
+        self._save()
+
+    def _save(self) -> None:
+        # Write then swap, so a crash mid-write can't leave a truncated file.
+        tmp = f"{self.path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(self._data, f, indent=2)
+        os.replace(tmp, self.path)

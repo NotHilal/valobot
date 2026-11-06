@@ -7,14 +7,17 @@ import io
 import math
 import os
 import re
+import time
 from datetime import datetime, timedelta
 
 import aiohttp
 import discord
 from discord import app_commands
+from discord.ext import tasks
 from dotenv import load_dotenv
 
 import counting
+import customgame
 import gacha
 import riot
 import storage
@@ -30,6 +33,47 @@ intents.members = True  # needed to see people joining, for /instantban
 # only reports the content of deleted messages it still has cached.
 client = discord.Client(intents=intents, max_messages=5000)
 tree = app_commands.CommandTree(client)
+
+# Custom games (shared with the Mikasa bot) keep their data on client.store.
+client.store = storage.Store(storage.CUSTOM_GAMES_FILE)
+tree.add_command(customgame.customgame_command)
+tree.add_command(customgame.leaderboard_command)
+# Registered up front so buttons on existing games still work after a restart.
+client.add_dynamic_items(
+    customgame.GameButton, customgame.TeamSelect, customgame.BallotSelect, customgame.ConfirmVote
+)
+VOTE_TIMER_CHECK_SECONDS = 5
+
+
+@tasks.loop(seconds=VOTE_TIMER_CHECK_SECONDS)
+async def check_vote_timers():
+    # An unhandled error would stop the loop for good, so log and try again.
+    try:
+        await customgame.expire_votes(client, time.time())
+    except Exception as exc:
+        print(f"custom game vote timer check failed: {exc!r}")
+
+
+@tree.command(name="custommaps", description="(Admins only) Set the maps custom games vote on")
+@app_commands.guild_only()
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.describe(maps="Map names separated by commas, like: Bind, Haven, Lotus. Leave empty to use every map.")
+async def custommaps_cmd(interaction: discord.Interaction, maps: str | None = None):
+    if not customgame.is_admin(interaction):
+        await interaction.response.send_message("❌ Only admins can change the maps.", ephemeral=True)
+        return
+    if maps is None:
+        client.store.update(interaction.guild_id, maps=None)
+        await interaction.response.send_message(
+            f"✅ Custom games will vote on every map: {', '.join(customgame.DEFAULT_MAPS)}.", ephemeral=True
+        )
+        return
+    parsed, problem = customgame.parse_maps(maps)
+    if problem:
+        await interaction.response.send_message(problem, ephemeral=True)
+        return
+    client.store.update(interaction.guild_id, maps=parsed)
+    await interaction.response.send_message(f"✅ Custom games will vote on: {', '.join(parsed)}.", ephemeral=True)
 
 
 async def _check_channel_lock(interaction: discord.Interaction, group: str) -> bool:
@@ -1045,6 +1089,7 @@ HELP_COMMANDS = [
     ("/collection", "Browse your (or someone else's) full skin collection and charges", None),
     ("/showoff", "Publicly show off 1-3 skins from your collection", None),
     ("/trade", "Propose a skin trade (sent via DM to the other person)", None),
+    ("/leaderboard", "Show who has the most custom game wins in this server", None),
     ("/helpme", "Show this list", None),
     ("/startcount", "Set the channel for the counting game", _is_mod_or_admin),
     ("/stopcount", "Turn off the counting game", _is_mod_or_admin),
@@ -1059,6 +1104,8 @@ HELP_COMMANDS = [
     ("/banword", "Time out anyone who types a specific word", _is_mod_or_admin),
     ("/unbanword", "Remove a word from the banned-word list", _is_mod_or_admin),
     ("/banwords", "List all banned words", _is_mod_or_admin),
+    ("/customgame", "Start a custom game: pick teams, vote on a map, report the winner", customgame.is_admin),
+    ("/custommaps", "Set the maps custom games vote on (leave empty for every map)", customgame.is_admin),
     ("/reactionrole", "Add a role to a named role menu in this channel (people react to get it)", _is_mod_or_admin),
     ("/removereactionrole", "Remove an emoji from one of this channel's role menus", _is_mod_or_admin),
     ("/displayroleselect", "Post one of this channel's role menus once it's set up", _is_mod_or_admin),
@@ -2551,6 +2598,8 @@ async def on_message(message: discord.Message):
 
 @client.event
 async def on_ready():
+    if not check_vote_timers.is_running():
+        check_vote_timers.start()
     await tree.sync()  # global sync (can take up to ~1hr to propagate)
     for guild in client.guilds:  # instant sync to every server the bot is already in
         tree.copy_global_to(guild=guild)
