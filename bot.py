@@ -1234,8 +1234,6 @@ def _role_menu_embed(guild: discord.Guild, name: str, menu: dict) -> discord.Emb
         + "\n\n".join(lines),
         color=menu.get("color") or discord.Color.blurple().value,
     )
-    if guild.icon:
-        embed.set_thumbnail(url=guild.icon.url)
     count = len(menu["roles"])
     pick = "pick one" if menu.get("pick_one") else "pick as many as you want"
     embed.set_footer(text=f"{guild.name} • {count} role{'s' if count != 1 else ''} • {pick}")
