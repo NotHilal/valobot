@@ -473,8 +473,19 @@ async def customgame_command(interaction: discord.Interaction):
     if not is_admin(interaction):
         await _deny(interaction, "❌ Only admins can start a custom game.")
         return
+    # The first message is an interaction reply, which works even in a channel the
+    # bot can't see, but the vote timer edits it later through the channel and
+    # would fail, leaving the vote looking open after it closed.
+    perms = interaction.app_permissions
+    if not (perms.view_channel and perms.send_messages and perms.embed_links and perms.read_message_history):
+        await _deny(
+            interaction,
+            "❌ I need **View Channel**, **Send Messages**, **Embed Links** and **Read Message History** "
+            "in this channel to run a custom game.",
+        )
+        return
 
-    game = {"phase": "teams", "team_a": [], "team_b": [], "channel_id": interaction.channel_id}
+    game ={"phase": "teams", "team_a": [], "team_b": [], "channel_id": interaction.channel_id}
     embed, view = render(game)
     callback = await interaction.response.send_message(embed=embed, view=view)
     message_id = callback.message_id or (await interaction.original_response()).id

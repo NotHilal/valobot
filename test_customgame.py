@@ -140,6 +140,13 @@ class StartTests(CustomGameCase):
         await customgame.customgame_command.callback(interaction)
         self.assertIsNone(self.game())
 
+    async def test_refuses_to_start_where_the_bot_cannot_see_the_channel(self):
+        interaction = self.interaction()
+        interaction.app_permissions.view_channel = False
+        await customgame.customgame_command.callback(interaction)
+        self.assertIsNone(self.game())
+        self.assertIn("View Channel", interaction.response.send_message.await_args.args[0])
+
     def test_commands_have_the_right_access(self):
         self.assertTrue(customgame.customgame_command.default_permissions.manage_guild)
         self.assertIsNone(customgame.leaderboard_command.default_permissions)
