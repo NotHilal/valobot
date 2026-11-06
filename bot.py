@@ -1062,6 +1062,7 @@ HELP_COMMANDS = [
     ("/reactionrole", "Add a role to a named role menu in this channel (people react to get it)", lambda i: _can_manage_reaction_roles(i)),
     ("/removereactionrole", "Remove an emoji from one of this channel's role menus", lambda i: _can_manage_reaction_roles(i)),
     ("/displayroleselect", "Post one of this channel's role menus once it's set up", lambda i: _can_manage_reaction_roles(i)),
+    ("/deleterolemenu", "Delete one of this channel's role menus (and its posted message)", lambda i: _can_manage_reaction_roles(i)),
     ("/checkdeleted", "See the messages and images mods have deleted from a user", _is_mod_or_admin),
     ("/setuplogs", "Post server logs (deleted/edited messages, mod actions, joins, voice) in a channel", _is_mod_or_admin),
     ("/stoplogs", "Stop posting server logs", _is_mod_or_admin),
@@ -1492,6 +1493,37 @@ async def displayroleselect_cmd(
             "but their old reaction will stay on the menu."
         )
     await interaction.followup.send(f"✅ **{name}** menu posted: {message.jump_url}{note}", ephemeral=True)
+
+
+@tree.command(name="deleterolemenu", description="(Mods/Admins only) Delete one of this channel's role menus")
+@app_commands.autocomplete(menu=_role_menu_autocomplete)
+@app_commands.describe(menu="Which menu to delete")
+async def deleterolemenu_cmd(interaction: discord.Interaction, menu: str):
+    if not _can_manage_reaction_roles(interaction):
+        await interaction.response.send_message("Only mods or admins can do that.", ephemeral=True)
+        return
+    if interaction.guild is None or not isinstance(interaction.channel, discord.TextChannel):
+        await interaction.response.send_message("Run this in a server text channel.", ephemeral=True)
+        return
+
+    guild, channel = interaction.guild, interaction.channel
+    name = _menu_name(menu)
+    if name not in storage.get_role_menu_names(guild.id, channel.id):
+        await interaction.response.send_message(f"There's no **{name}** menu in this channel.", ephemeral=True)
+        return
+
+    await interaction.response.defer(thinking=True, ephemeral=True)
+    message = await _fetch_role_menu_message(channel, storage.get_role_menu(guild.id, channel.id, name))
+    if message is not None:
+        try:
+            await message.delete()
+        except discord.HTTPException:
+            pass
+    storage.save_role_menu(guild.id, channel.id, name, None)
+    # Members keep roles they already picked; this only removes the menu.
+    await interaction.followup.send(
+        f"🗑️ Deleted the **{name}** menu. Anyone who already picked a role from it keeps it.", ephemeral=True
+    )
 
 
 async def _handle_role_reaction(payload: discord.RawReactionActionEvent, adding: bool) -> None:
