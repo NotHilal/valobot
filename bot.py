@@ -1059,8 +1059,8 @@ HELP_COMMANDS = [
     ("/banword", "Time out anyone who types a specific word", _is_mod_or_admin),
     ("/unbanword", "Remove a word from the banned-word list", _is_mod_or_admin),
     ("/banwords", "List all banned words", _is_mod_or_admin),
-    ("/reactionrole", "Let people get a role by reacting to a menu in this channel", _is_mod_or_admin),
-    ("/removereactionrole", "Remove an emoji from this channel's role menu", _is_mod_or_admin),
+    ("/reactionrole", "Let people get a role by reacting to a menu in this channel", lambda i: _can_manage_reaction_roles(i)),
+    ("/removereactionrole", "Remove an emoji from this channel's role menu", lambda i: _can_manage_reaction_roles(i)),
     ("/checkdeleted", "See the messages and images mods have deleted from a user", _is_mod_or_admin),
     ("/setuplogs", "Post server logs (deleted/edited messages, mod actions, joins, voice) in a channel", _is_mod_or_admin),
     ("/stoplogs", "Stop posting server logs", _is_mod_or_admin),
@@ -1224,6 +1224,24 @@ def _role_menu_embed(guild: discord.Guild, menu: dict) -> discord.Embed:
     )
 
 
+# Roles that would let whoever picks them moderate or take over the server. Only the
+# server owner can put these on a role menu.
+DANGEROUS_ROLE_PERMISSIONS = discord.Permissions(
+    administrator=True, manage_guild=True, manage_roles=True, manage_channels=True,
+    manage_messages=True, manage_webhooks=True, ban_members=True, kick_members=True,
+    moderate_members=True, mention_everyone=True,
+)
+
+
+def _is_bot_owner(interaction: discord.Interaction) -> bool:
+    return interaction.user.id == client.application.owner.id
+
+
+def _can_manage_reaction_roles(interaction: discord.Interaction) -> bool:
+    # The bot owner can set these up in servers where they aren't a mod.
+    return _is_mod_or_admin(interaction) or _is_bot_owner(interaction)
+
+
 async def _fetch_role_menu_message(channel: discord.TextChannel, menu: dict) -> discord.Message | None:
     if menu["message_id"] is None:
         return None
@@ -1234,10 +1252,9 @@ async def _fetch_role_menu_message(channel: discord.TextChannel, menu: dict) -> 
 
 
 @tree.command(name="reactionrole", description="(Mods/Admins only) Let people get a role by reacting in this channel")
-@app_commands.default_permissions(administrator=True)
 @app_commands.describe(emoji="The emoji people react with", role="The role they get")
 async def reactionrole_cmd(interaction: discord.Interaction, emoji: str, role: discord.Role):
-    if not _is_mod_or_admin(interaction):
+    if not _can_manage_reaction_roles(interaction):
         await interaction.response.send_message("Only mods or admins can do that.", ephemeral=True)
         return
     if interaction.guild is None or not isinstance(interaction.channel, discord.TextChannel):
@@ -1255,8 +1272,15 @@ async def reactionrole_cmd(interaction: discord.Interaction, emoji: str, role: d
             ephemeral=True,
         )
         return
-    # Without this, a mod could hand everyone a role higher than their own (e.g. an admin role).
-    if not _is_owner(interaction) and role >= interaction.user.top_role:
+    if not _is_owner(interaction) and (role.permissions.value & DANGEROUS_ROLE_PERMISSIONS.value):
+        await interaction.response.send_message(
+            f"{role.mention} has moderator/admin permissions, so only the server owner can put it on a role menu.",
+            ephemeral=True,
+        )
+        return
+    # Without this, a mod could hand everyone a role higher than their own. The bot
+    # owner is exempt since they may not have any roles in the server.
+    if not (_is_owner(interaction) or _is_bot_owner(interaction)) and role >= interaction.user.top_role:
         await interaction.response.send_message(
             "You can only set up roles below your own highest role.", ephemeral=True
         )
@@ -1295,10 +1319,9 @@ async def reactionrole_cmd(interaction: discord.Interaction, emoji: str, role: d
 
 
 @tree.command(name="removereactionrole", description="(Mods/Admins only) Remove an emoji from this channel's role menu")
-@app_commands.default_permissions(administrator=True)
 @app_commands.describe(emoji="The emoji to remove")
 async def removereactionrole_cmd(interaction: discord.Interaction, emoji: str):
-    if not _is_mod_or_admin(interaction):
+    if not _can_manage_reaction_roles(interaction):
         await interaction.response.send_message("Only mods or admins can do that.", ephemeral=True)
         return
     if interaction.guild is None or not isinstance(interaction.channel, discord.TextChannel):
