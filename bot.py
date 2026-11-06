@@ -1221,10 +1221,15 @@ DEFAULT_PICK_ONE_TEXT = "React with **one** emoji below to get its role.\nPickin
 
 def _role_menu_embed(guild: discord.Guild, name: str, menu: dict) -> discord.Embed:
     descriptions = menu.get("descriptions", {})
+    labels = menu.get("labels", {})
     lines = []
     for emoji, role_id in menu["roles"].items():
-        role = guild.get_role(role_id)
-        line = f"{emoji}  ┃  {role.mention if role else '*deleted role*'}"
+        if role_id is None:
+            shown = f"**{labels.get(emoji, 'No role')}**"
+        else:
+            role = guild.get_role(role_id)
+            shown = role.mention if role else "*deleted role*"
+        line = f"{emoji}  ┃  {shown}"
         if descriptions.get(emoji):
             line += f"\n-# {descriptions[emoji]}"
         lines.append(line)
@@ -1285,14 +1290,16 @@ async def _fetch_role_menu_message(channel: discord.TextChannel, menu: dict) -> 
 @app_commands.describe(
     menu="Which menu in this channel, e.g. age, ranks, notifs (a new name starts a new menu)",
     emoji="The emoji people react with",
-    role="The role they get",
+    role="The role they get (leave empty for a \"no thanks\" option that gives no role)",
+    label="Text shown for an option with no role, e.g. No thanks",
     description="Optional short line shown under the role",
 )
 async def reactionrole_cmd(
     interaction: discord.Interaction,
     menu: app_commands.Range[str, 1, 32],
     emoji: str,
-    role: discord.Role,
+    role: discord.Role | None = None,
+    label: app_commands.Range[str, 1, 80] | None = None,
     description: app_commands.Range[str, 1, 100] | None = None,
 ):
     if not _can_manage_reaction_roles(interaction):
@@ -1304,16 +1311,23 @@ async def reactionrole_cmd(
 
     guild = interaction.guild
     me = guild.me
-    if role.is_default() or role.managed:
+    if role is None and label is None:
+        await interaction.response.send_message(
+            "Pick a `role`, or give a `label` (like *No thanks*) for an option that gives no role.", ephemeral=True
+        )
+        return
+    if role is None:
+        pass
+    elif role.is_default() or role.managed:
         await interaction.response.send_message("That role can't be handed out.", ephemeral=True)
         return
-    if not me.guild_permissions.manage_roles or role >= me.top_role:
+    elif not me.guild_permissions.manage_roles or role >= me.top_role:
         await interaction.response.send_message(
             f"I need **Manage Roles**, and my highest role has to be above {role.mention} in the role list.",
             ephemeral=True,
         )
         return
-    if not _is_owner(interaction) and (role.permissions.value & DANGEROUS_ROLE_PERMISSIONS.value):
+    elif not _is_owner(interaction) and (role.permissions.value & DANGEROUS_ROLE_PERMISSIONS.value):
         await interaction.response.send_message(
             f"{role.mention} has moderator/admin permissions, so only the server owner can put it on a role menu.",
             ephemeral=True,
@@ -1321,7 +1335,7 @@ async def reactionrole_cmd(
         return
     # Without this, a mod could hand everyone a role higher than their own. The bot
     # owner is exempt since they may not have any roles in the server.
-    if not (_is_owner(interaction) or _is_bot_owner(interaction)) and role >= interaction.user.top_role:
+    elif not (_is_owner(interaction) or _is_bot_owner(interaction)) and role >= interaction.user.top_role:
         await interaction.response.send_message(
             "You can only set up roles below your own highest role.", ephemeral=True
         )
@@ -1338,7 +1352,12 @@ async def reactionrole_cmd(
         return
 
     await interaction.response.defer(thinking=True, ephemeral=True)
-    menu["roles"][key] = role.id
+    menu["roles"][key] = role.id if role else None
+    labels = menu.setdefault("labels", {})
+    if role is None:
+        labels[key] = label
+    else:
+        labels.pop(key, None)
     descriptions = menu.setdefault("descriptions", {})
     if description:
         descriptions[key] = description
@@ -1359,11 +1378,12 @@ async def reactionrole_cmd(
             return
 
     storage.save_role_menu(guild.id, channel.id, name, menu)
+    gives = role.mention if role else f"**{label}** (no role)"
     if message is not None:
-        await interaction.followup.send(f"✅ Added {key} → {role.mention} to the posted **{name}** menu.", ephemeral=True)
+        await interaction.followup.send(f"✅ Added {key} → {gives} to the posted **{name}** menu.", ephemeral=True)
     else:
         await interaction.followup.send(
-            f"✅ Added {key} → {role.mention} to **{name}**. Here's a preview — "
+            f"✅ Added {key} → {gives} to **{name}**. Here's a preview — "
             f"run `/displayroleselect menu:{name}` when you're done.",
             embed=_role_menu_embed(guild, name, menu),
             ephemeral=True,
@@ -1392,6 +1412,7 @@ async def removereactionrole_cmd(interaction: discord.Interaction, menu: str, em
     await interaction.response.defer(thinking=True, ephemeral=True)
     del menu["roles"][key]
     menu.get("descriptions", {}).pop(key, None)
+    menu.get("labels", {}).pop(key, None)
     message = await _fetch_role_menu_message(channel, menu)
     try:
         if not menu["roles"]:
@@ -1532,13 +1553,22 @@ async def _handle_role_reaction(payload: discord.RawReactionActionEvent, adding:
     menu = storage.find_role_menu_by_message(payload.guild_id, payload.message_id)
     if menu is None:
         return
-    role_id = menu["roles"].get(_find_menu_emoji(menu, str(payload.emoji)))
+    emoji = _find_menu_emoji(menu, str(payload.emoji))
     guild = client.get_guild(payload.guild_id)
-    if role_id is None or guild is None:
+    if emoji is None or guild is None:
+        return
+    member = payload.member or guild.get_member(payload.user_id)
+    if member is None or member.bot:
+        return
+    role_id = menu["roles"][emoji]
+    if role_id is None:
+        # A "no thanks" option: nothing to give, but on a pick-one menu it still
+        # clears whatever they picked before.
+        if adding and menu.get("pick_one"):
+            await _drop_other_menu_picks(guild, payload, member, menu, emoji)
         return
     role = guild.get_role(role_id)
-    member = payload.member or guild.get_member(payload.user_id)
-    if role is None or member is None or member.bot:
+    if role is None:
         return
     try:
         if adding:
@@ -1550,14 +1580,14 @@ async def _handle_role_reaction(payload: discord.RawReactionActionEvent, adding:
         return
 
     if adding and menu.get("pick_one"):
-        await _drop_other_menu_picks(guild, payload, member, menu, role_id)
+        await _drop_other_menu_picks(guild, payload, member, menu, emoji)
 
 
 async def _drop_other_menu_picks(
-    guild: discord.Guild, payload: discord.RawReactionActionEvent, member: discord.Member, menu: dict, kept_role_id: int
+    guild: discord.Guild, payload: discord.RawReactionActionEvent, member: discord.Member, menu: dict, kept_emoji: str
 ) -> None:
     """On a pick-one menu, take away the member's other roles from it and their other reactions."""
-    others = {e: r for e, r in menu["roles"].items() if r != kept_role_id}
+    others = {e: r for e, r in menu["roles"].items() if e != kept_emoji}
     old_roles = [r for r in member.roles if r.id in others.values()]
     try:
         if old_roles:
@@ -1570,8 +1600,9 @@ async def _drop_other_menu_picks(
         return
     message = channel.get_partial_message(payload.message_id)
     for emoji, role_id in others.items():
-        # Only bother for roles they actually had, to avoid a request per emoji.
-        if any(r.id == role_id for r in old_roles):
+        # Only bother for roles they actually had (and no-role options, which leave
+        # no trace on the member), to avoid a request per emoji.
+        if role_id is None or any(r.id == role_id for r in old_roles):
             try:
                 await message.remove_reaction(emoji, member)
             except discord.HTTPException:
