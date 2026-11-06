@@ -1059,9 +1059,9 @@ HELP_COMMANDS = [
     ("/banword", "Time out anyone who types a specific word", _is_mod_or_admin),
     ("/unbanword", "Remove a word from the banned-word list", _is_mod_or_admin),
     ("/banwords", "List all banned words", _is_mod_or_admin),
-    ("/reactionrole", "Add a role to this channel's role menu (people react to get it)", lambda i: _can_manage_reaction_roles(i)),
-    ("/removereactionrole", "Remove an emoji from this channel's role menu", lambda i: _can_manage_reaction_roles(i)),
-    ("/displayroleselect", "Post this channel's role menu once it's set up", lambda i: _can_manage_reaction_roles(i)),
+    ("/reactionrole", "Add a role to a named role menu in this channel (people react to get it)", lambda i: _can_manage_reaction_roles(i)),
+    ("/removereactionrole", "Remove an emoji from one of this channel's role menus", lambda i: _can_manage_reaction_roles(i)),
+    ("/displayroleselect", "Post one of this channel's role menus once it's set up", lambda i: _can_manage_reaction_roles(i)),
     ("/checkdeleted", "See the messages and images mods have deleted from a user", _is_mod_or_admin),
     ("/setuplogs", "Post server logs (deleted/edited messages, mod actions, joins, voice) in a channel", _is_mod_or_admin),
     ("/stoplogs", "Stop posting server logs", _is_mod_or_admin),
@@ -1214,11 +1214,11 @@ def _find_menu_emoji(menu: dict, emoji: str) -> str | None:
 
 
 MAX_MENU_ROLES = 20  # Discord allows at most 20 different reactions on one message
-DEFAULT_MENU_TITLE = "✨ Pick your roles"
 DEFAULT_MENU_TEXT = "React with an emoji below to get its role.\nRemove your reaction any time to drop it."
+DEFAULT_PICK_ONE_TEXT = "React with **one** emoji below to get its role.\nPicking a different one swaps it."
 
 
-def _role_menu_embed(guild: discord.Guild, menu: dict) -> discord.Embed:
+def _role_menu_embed(guild: discord.Guild, name: str, menu: dict) -> discord.Embed:
     descriptions = menu.get("descriptions", {})
     lines = []
     for emoji, role_id in menu["roles"].items():
@@ -1229,14 +1229,16 @@ def _role_menu_embed(guild: discord.Guild, menu: dict) -> discord.Embed:
         lines.append(line)
 
     embed = discord.Embed(
-        title=menu.get("title") or DEFAULT_MENU_TITLE,
-        description=f"{menu.get('text') or DEFAULT_MENU_TEXT}\n\n" + "\n\n".join(lines),
+        title=menu.get("title") or f"✨ {name.title()}",
+        description=f"{menu.get('text') or (DEFAULT_PICK_ONE_TEXT if menu.get('pick_one') else DEFAULT_MENU_TEXT)}\n\n"
+        + "\n\n".join(lines),
         color=menu.get("color") or discord.Color.blurple().value,
     )
     if guild.icon:
         embed.set_thumbnail(url=guild.icon.url)
     count = len(menu["roles"])
-    embed.set_footer(text=f"{guild.name} • {count} role{'s' if count != 1 else ''} to pick from")
+    pick = "pick one" if menu.get("pick_one") else "pick as many as you want"
+    embed.set_footer(text=f"{guild.name} • {count} role{'s' if count != 1 else ''} • {pick}")
     return embed
 
 
@@ -1258,6 +1260,18 @@ def _can_manage_reaction_roles(interaction: discord.Interaction) -> bool:
     return _is_mod_or_admin(interaction) or _is_bot_owner(interaction)
 
 
+def _menu_name(name: str) -> str:
+    return " ".join(name.lower().split())
+
+
+async def _role_menu_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+    if interaction.guild is None or interaction.channel is None:
+        return []
+    names = storage.get_role_menu_names(interaction.guild.id, interaction.channel.id)
+    current = _menu_name(current)
+    return [app_commands.Choice(name=n, value=n) for n in names if current in n][:25]
+
+
 async def _fetch_role_menu_message(channel: discord.TextChannel, menu: dict) -> discord.Message | None:
     if menu["message_id"] is None:
         return None
@@ -1267,14 +1281,17 @@ async def _fetch_role_menu_message(channel: discord.TextChannel, menu: dict) -> 
         return None
 
 
-@tree.command(name="reactionrole", description="(Mods/Admins only) Add a role to this channel's role menu")
+@tree.command(name="reactionrole", description="(Mods/Admins only) Add a role to one of this channel's role menus")
+@app_commands.autocomplete(menu=_role_menu_autocomplete)
 @app_commands.describe(
+    menu="Which menu in this channel, e.g. age, ranks, notifs (a new name starts a new menu)",
     emoji="The emoji people react with",
     role="The role they get",
     description="Optional short line shown under the role",
 )
 async def reactionrole_cmd(
     interaction: discord.Interaction,
+    menu: app_commands.Range[str, 1, 32],
     emoji: str,
     role: discord.Role,
     description: app_commands.Range[str, 1, 100] | None = None,
@@ -1312,7 +1329,8 @@ async def reactionrole_cmd(
         return
 
     channel = interaction.channel
-    menu = storage.get_role_menu(guild.id, channel.id)
+    name = _menu_name(menu)
+    menu = storage.get_role_menu(guild.id, channel.id, name)
     key = _find_menu_emoji(menu, _emoji_key(emoji)) or _emoji_key(emoji)
     if key not in menu["roles"] and len(menu["roles"]) >= MAX_MENU_ROLES:
         await interaction.response.send_message(
@@ -1332,7 +1350,7 @@ async def reactionrole_cmd(
     message = await _fetch_role_menu_message(channel, menu)
     if message is not None:
         try:
-            await message.edit(embed=_role_menu_embed(guild, menu))
+            await message.edit(embed=_role_menu_embed(guild, name, menu))
             await message.add_reaction(key)
         except discord.HTTPException as exc:
             await interaction.followup.send(
@@ -1341,20 +1359,22 @@ async def reactionrole_cmd(
             )
             return
 
-    storage.save_role_menu(guild.id, channel.id, menu)
+    storage.save_role_menu(guild.id, channel.id, name, menu)
     if message is not None:
-        await interaction.followup.send(f"✅ Added {key} → {role.mention} to the posted menu.", ephemeral=True)
+        await interaction.followup.send(f"✅ Added {key} → {role.mention} to the posted **{name}** menu.", ephemeral=True)
     else:
         await interaction.followup.send(
-            f"✅ Added {key} → {role.mention}. Here's a preview — run `/displayroleselect` when you're done.",
-            embed=_role_menu_embed(guild, menu),
+            f"✅ Added {key} → {role.mention} to **{name}**. Here's a preview — "
+            f"run `/displayroleselect menu:{name}` when you're done.",
+            embed=_role_menu_embed(guild, name, menu),
             ephemeral=True,
         )
 
 
-@tree.command(name="removereactionrole", description="(Mods/Admins only) Remove an emoji from this channel's role menu")
-@app_commands.describe(emoji="The emoji to remove")
-async def removereactionrole_cmd(interaction: discord.Interaction, emoji: str):
+@tree.command(name="removereactionrole", description="(Mods/Admins only) Remove an emoji from one of this channel's role menus")
+@app_commands.autocomplete(menu=_role_menu_autocomplete)
+@app_commands.describe(menu="Which menu in this channel", emoji="The emoji to remove")
+async def removereactionrole_cmd(interaction: discord.Interaction, menu: str, emoji: str):
     if not _can_manage_reaction_roles(interaction):
         await interaction.response.send_message("Only mods or admins can do that.", ephemeral=True)
         return
@@ -1363,10 +1383,11 @@ async def removereactionrole_cmd(interaction: discord.Interaction, emoji: str):
         return
 
     guild, channel = interaction.guild, interaction.channel
-    menu = storage.get_role_menu(guild.id, channel.id)
+    name = _menu_name(menu)
+    menu = storage.get_role_menu(guild.id, channel.id, name)
     key = _find_menu_emoji(menu, _emoji_key(emoji))
     if key is None:
-        await interaction.response.send_message(f"{emoji} isn't on this channel's role menu.", ephemeral=True)
+        await interaction.response.send_message(f"{emoji} isn't on the **{name}** menu here.", ephemeral=True)
         return
 
     await interaction.response.defer(thinking=True, ephemeral=True)
@@ -1377,26 +1398,31 @@ async def removereactionrole_cmd(interaction: discord.Interaction, emoji: str):
         if not menu["roles"]:
             if message is not None:
                 await message.delete()
-            storage.save_role_menu(guild.id, channel.id, None)
-            await interaction.followup.send("🗑️ That was the last role, so the menu is gone.", ephemeral=True)
+            storage.save_role_menu(guild.id, channel.id, name, None)
+            await interaction.followup.send(f"🗑️ That was the last role, so the **{name}** menu is gone.", ephemeral=True)
             return
         if message is not None:
-            await message.edit(embed=_role_menu_embed(guild, menu))
+            await message.edit(embed=_role_menu_embed(guild, name, menu))
             await message.clear_reaction(key)
     except discord.HTTPException:
         pass  # the stored menu is what matters; a stale reaction is harmless
-    storage.save_role_menu(guild.id, channel.id, menu)
-    await interaction.followup.send(f"✅ Removed {key} from the role menu.", ephemeral=True)
+    storage.save_role_menu(guild.id, channel.id, name, menu)
+    await interaction.followup.send(f"✅ Removed {key} from the **{name}** menu.", ephemeral=True)
 
 
-@tree.command(name="displayroleselect", description="(Mods/Admins only) Post this channel's role menu")
+@tree.command(name="displayroleselect", description="(Mods/Admins only) Post one of this channel's role menus")
+@app_commands.autocomplete(menu=_role_menu_autocomplete)
 @app_commands.describe(
-    title="Optional title (default: ✨ Pick your roles)",
+    menu="Which menu to post",
+    pick_one="Only let people have one role from this menu (good for age or rank)",
+    title="Optional title (default: ✨ plus the menu's name)",
     text="Optional text shown above the roles",
     color="Optional embed color as a hex code, like #ff66cc",
 )
 async def displayroleselect_cmd(
     interaction: discord.Interaction,
+    menu: str,
+    pick_one: bool | None = None,
     title: app_commands.Range[str, 1, 256] | None = None,
     text: app_commands.Range[str, 1, 1000] | None = None,
     color: str | None = None,
@@ -1409,10 +1435,12 @@ async def displayroleselect_cmd(
         return
 
     guild, channel = interaction.guild, interaction.channel
-    menu = storage.get_role_menu(guild.id, channel.id)
+    name = _menu_name(menu)
+    menu = storage.get_role_menu(guild.id, channel.id, name)
     if not menu["roles"]:
         await interaction.response.send_message(
-            "This channel's role menu is empty — add roles with `/reactionrole` first.", ephemeral=True
+            f"There's no **{name}** menu in this channel yet. Add roles to it with `/reactionrole menu:{name}` first.",
+            ephemeral=True,
         )
         return
     if color is not None:
@@ -1434,10 +1462,12 @@ async def displayroleselect_cmd(
         menu["title"] = title
     if text:
         menu["text"] = text
+    if pick_one is not None:
+        menu["pick_one"] = pick_one
 
     # Re-running this reposts the menu, so drop the old copy instead of leaving two.
     old_message = await _fetch_role_menu_message(channel, menu)
-    message = await channel.send(embed=_role_menu_embed(guild, menu))
+    message = await channel.send(embed=_role_menu_embed(guild, name, menu))
     failed = []
     for emoji in menu["roles"]:
         try:
@@ -1445,7 +1475,7 @@ async def displayroleselect_cmd(
         except discord.HTTPException:
             failed.append(emoji)
     menu["message_id"] = message.id
-    storage.save_role_menu(guild.id, channel.id, menu)
+    storage.save_role_menu(guild.id, channel.id, name, menu)
     if old_message is not None:
         try:
             await old_message.delete()
@@ -1458,7 +1488,12 @@ async def displayroleselect_cmd(
             f"\n⚠️ I couldn't react with {' '.join(failed)}. Custom emojis have to be from a server I'm in, "
             "so remove those with `/removereactionrole`."
         )
-    await interaction.followup.send(f"✅ Role menu posted: {message.jump_url}{note}", ephemeral=True)
+    if menu.get("pick_one") and not perms.manage_messages:
+        note += (
+            "\n⚠️ Without **Manage Messages** here I can still swap people's roles, "
+            "but their old reaction will stay on the menu."
+        )
+    await interaction.followup.send(f"✅ **{name}** menu posted: {message.jump_url}{note}", ephemeral=True)
 
 
 async def _handle_role_reaction(payload: discord.RawReactionActionEvent, adding: bool) -> None:
@@ -1482,6 +1517,35 @@ async def _handle_role_reaction(payload: discord.RawReactionActionEvent, adding:
             await member.remove_roles(role, reason="Reaction role")
     except discord.HTTPException as exc:
         print(f"reaction role failed for {member.id} in guild {guild.id}: {exc!r}")
+        return
+
+    if adding and menu.get("pick_one"):
+        await _drop_other_menu_picks(guild, payload, member, menu, role_id)
+
+
+async def _drop_other_menu_picks(
+    guild: discord.Guild, payload: discord.RawReactionActionEvent, member: discord.Member, menu: dict, kept_role_id: int
+) -> None:
+    """On a pick-one menu, take away the member's other roles from it and their other reactions."""
+    others = {e: r for e, r in menu["roles"].items() if r != kept_role_id}
+    old_roles = [r for r in member.roles if r.id in others.values()]
+    try:
+        if old_roles:
+            await member.remove_roles(*old_roles, reason="Reaction role (pick one)")
+    except discord.HTTPException as exc:
+        print(f"pick-one role swap failed for {member.id} in guild {guild.id}: {exc!r}")
+
+    channel = guild.get_channel(payload.channel_id)
+    if channel is None:
+        return
+    message = channel.get_partial_message(payload.message_id)
+    for emoji, role_id in others.items():
+        # Only bother for roles they actually had, to avoid a request per emoji.
+        if any(r.id == role_id for r in old_roles):
+            try:
+                await message.remove_reaction(emoji, member)
+            except discord.HTTPException:
+                pass  # needs Manage Messages; the role swap already happened either way
 
 
 @client.event
